@@ -1,109 +1,156 @@
-<!-- @author lxy -->
-# Dev Copilot —— AI 研发助手 Agent
+<!-- 作者：lxy -->
 
-一个辅助开发的个人 Agent 引擎项目。核心走 **OpenSpec 四阶段流程**（`proposal → design → tasks → apply`），
-在关键节点通过 **HITL（Human-in-the-Loop）断点** 让用户参与决策，确保 AI 的每一步产出可控、可审、可回退。
+# AI 研发助手（Dev Copilot）
 
-> 技术栈：FastAPI + LangGraph + Redis + Docker（Python 引擎） / Spring Boot + MyBatis-Plus（Java 数据服务）
+> 基于 LangGraph + FastAPI 的多 Agent 协作引擎，支持 OpenSpec 四阶段需求交付、HITL 人机协同审批、CAS 抢占式调度与 MCP 三层容错工具链。
 
 ---
 
-## 一、项目定位
+## 功能亮点
 
-Dev Copilot 是一个「规范驱动」的研发助手：不追求一步到位地生成代码，而是把一次开发拆成四个可审阅的阶段。
-
-| 阶段 | 名称 | 产出 | HITL 断点 |
-|------|------|------|-----------|
-| 1 | **Proposal（提案）** | 需求理解、目标与范围 | 用户确认「要做什么」 |
-| 2 | **Design（设计）** | 技术方案、架构与取舍 | 用户确认「怎么做」 |
-| 3 | **Tasks（拆解）** | 可执行任务清单 + 依赖顺序 | 用户确认「分几步做」 |
-| 4 | **Apply（实施）** | 落地代码变更 | 高风险操作前人工复核 |
+- **Dispatcher 智能路由** — Flash LLM 结构化输出 + 800ms 超时降级规则兜底，动态选择 L1/L2 模型
+- **CAS 抢占式调度** — Redis SETNX + Lua 原子脚本 + 心跳续期（TTL 120s / 心跳 60s），拉模式任务队列
+- **记忆三层截断** — Redis ZSET 按时间戳存储，轮次≤10 / 单条≤500字 / 总量≤2000字，防 token 爆炸
+- **MCP 三层容错** — L1 并行初始化 / L2 退避重试(5-10-15s) / L3 后台自愈重连，混合工具源
+- **多 Agent Supervisor** — LLM-as-Planner 拆解子任务 + SubAgent-as-Tool 委派执行 + 结果整合
+- **OpenSpec 四阶段** — proposal → design → tasks → apply，每阶段 HITL 断点等待用户确认
+- **HITL 门控** — LangGraph `interrupt()` 原语实现高风险操作审核（write_file / git_commit 等）
+- **RAG 知识检索** — FAISS IndexFlatL2 + RecursiveCharacterTextSplitter，top-k 召回 + 距离阈值过滤
+- **SSE 流式输出** — `astream_events(v2)` 逐 token 推送，支持 tool/approval/done 多事件类型
+- **配置热更新** — Redis Hash + 本地缓存 + 30s 轮询刷新，对标 Diamond 配置中心
+- **Java 持久化** — Redis Stream → Spring Boot Consumer Group → MyBatis-Plus saveBatch → MySQL
 
 ---
 
-## 二、架构概览
+## 架构图
 
+```mermaid
+graph TB
+    User[用户请求] --> API[FastAPI Gateway]
+    API --> Dispatcher[Dispatcher 智能路由]
+    Dispatcher -->|L1 简单| Graph[LangGraph 编排图]
+    Dispatcher -->|L2 复杂| Supervisor[Supervisor 多 Agent 协作]
+    Supervisor --> Graph
+
+    Graph --> Memory[Memory 记忆<br/>Redis ZSET + 三层截断]
+    Graph --> MCP[MCP 工具链<br/>三层容错]
+    Graph --> HITL[HITL 门控<br/>interrupt]
+    Graph --> RAG[RAG 检索<br/>FAISS]
+    Graph --> SSE[SSE 流式引擎]
+    SSE --> Frontend[前端]
+
+    Memory --> Redis[(Redis)]
+    MCP --> ToolServer[远程 MCP Server]
+    Redis --> Stream[Redis Stream]
+    Stream --> Java[Java Service<br/>Spring Boot]
+    Java --> MySQL[(MySQL)]
+
+    DynConfig[Redis Hash 动态配置] -.->|热更新| Dispatcher
+    DynConfig -.->|热更新| Graph
 ```
-                    ┌─────────────────────────────────────────┐
-                    │            FastAPI 引擎 (engine)          │
-                    │                                           │
-   用户 ──/chat──▶  │  Dispatcher 路由 → LangGraph 编排 → SSE  │ ──▶ 流式输出
-                    │        │            │           │        │
-                    │        ▼            ▼           ▼        │
-                    │   Memory 记忆   MCP 工具链   HITL 断点    │
-                    └────────┬──────────────┬───────────────────┘
-                             │              │
-                        ┌────▼────┐   ┌─────▼──────┐
-                        │  Redis  │   │ Java 数据   │
-                        │ 记忆/锁 │   │ 服务(持久化)│
-                        │ 队列/配置│   └────────────┘
-                        └─────────┘
-```
-
-核心模块（后续任务逐步实现）：
-
-- **Dispatcher 智能路由**：Flash 模型 Structured Output，按复杂度 L1/L2 分流
-- **CAS 任务抢占**：Redis SETNX + TTL 原子抢占（拉模式）
-- **Memory 记忆**：Redis ZSET 存长期记忆 + 滑动窗口三层截断
-- **MCP 工具链**：初始化 / 运行时 / 自愈 三层容错
-- **多 Agent 协作**：LLM-as-Supervisor + write_todos 任务规划
-- **RAG 知识库**：向量语义检索（区别于代码 agentic search）
-- **HITL 人工复核**：LangGraph interrupt 高风险审核门控
-- **Tracing 埋点**：分步骤耗时 + Token 消耗统计
 
 ---
 
-## 三、目录结构
+## 技术栈
+
+| 层级 | 技术选型 |
+|------|----------|
+| **Python 引擎** | FastAPI 0.115+ · LangGraph 0.2+ · LangChain-OpenAI · Redis (aioredis) · httpx · Pydantic 2 · FAISS · Loguru |
+| **Java 数据服务** | Spring Boot 3.2 · MyBatis-Plus 3.5 · Redis Stream Consumer Group · MySQL 8.0 |
+| **基础设施** | Docker Compose · Redis 7 (AOF) · MySQL 8 · SSE · MCP Protocol |
+| **LLM** | DeepSeek-Chat (L1 路由/轻量) · DeepSeek-Reasoner (L2 复杂推理) · OpenAI 兼容协议 |
+
+---
+
+## 快速启动
+
+```bash
+# 1. 克隆仓库 & 配置环境变量
+git clone <repo-url> && cd agent
+cp .env.example .env
+# 编辑 .env，填入 LLM_API_KEY（DeepSeek / OpenAI 兼容 key）
+
+# 2. 一键启动（Redis + MySQL + Python 引擎 + Java 服务）
+docker compose up -d --build
+
+# 3. 访问
+# 前端聊天界面：http://localhost:8000
+# API 文档：    http://localhost:8000/docs
+# Java 数据服务：http://localhost:8081
+# 健康检查：    curl http://localhost:8000/health
+```
+
+> 本地开发：`cd engine && pip install -e . && python -m engine.main`（需本地 Redis）
+
+---
+
+## 项目结构
 
 ```
 agent/
-├── docker-compose.yml        # Redis + Python 引擎 +（Java 占位）一键启动
-├── .env.example              # 配置项示例
-├── engine/                   # Python Agent 引擎（核心）
-│   ├── main.py               # FastAPI 入口（lifespan 初始化）
-│   ├── config/settings.py    # Pydantic Settings 配置
-│   ├── infra/                # 基础设施：redis / llm / dynamic_config
-│   ├── core/                 # 核心模块（dispatcher/memory/mcp/... 后续填充）
-│   ├── orchestrator/         # LangGraph 编排
-│   ├── agents/               # 业务 Agent
-│   ├── api/                  # FastAPI 路由
-│   └── tests/                # 单元测试
-├── java-service/             # Java 数据服务（占位）
-└── docs/                     # 架构 / 面试 / 技术详解文档
+├── docker-compose.yml           # 多服务编排（Redis/MySQL/Engine/Java）
+├── .env.example                 # 环境变量模板
+├── engine/                      # Python Agent 引擎（核心）
+│   ├── main.py                  # FastAPI 入口 + lifespan 初始化
+│   ├── config/settings.py       # Pydantic Settings 配置管理
+│   ├── infra/                   # 基础设施（redis_client / llm_client / dynamic_config）
+│   ├── core/
+│   │   ├── dispatcher/          # 智能路由（Flash LLM + 超时降级）
+│   │   ├── scheduler/           # CAS 抢占锁 + 任务队列
+│   │   ├── memory/              # ZSET 记忆 + 三层截断格式化
+│   │   ├── mcp/                 # MCP 三层容错 + 混合工具源
+│   │   ├── orchestrator/        # Supervisor + Planner + SubAgentTool
+│   │   ├── openspec/            # 四阶段工作流（proposal→apply）
+│   │   ├── hitl/                # HITL 人机协同中断门控
+│   │   ├── rag/                 # FAISS 向量检索 + Retriever
+│   │   └── streaming/           # SSE 流式引擎
+│   ├── orchestrator/            # LangGraph 编排（graph_builder / nodes）
+│   ├── api/                     # REST 路由（chat / tasks / tools）
+│   └── tests/                   # 单元测试
+├── java-service/                # Java 持久化服务（Spring Boot + MyBatis-Plus）
+└── docs/                        # 技术文档
 ```
 
 ---
 
-## 四、快速启动
+## 文档索引
 
-### 方式一：Docker Compose（推荐）
-
-```bash
-# 1. 准备配置
-cp .env.example .env
-# 编辑 .env 填入 LLM_API_KEY
-
-# 2. 一键启动（Redis + 引擎）
-docker compose up -d
-
-# 3. 健康检查
-curl http://localhost:8000/health
-```
-
-### 方式二：本地开发
-
-```bash
-cd engine
-# 安装依赖（推荐 uv）
-uv pip install -r pyproject.toml
-# 或：pip install -e .
-
-# 启动（需本地已运行 Redis）
-python -m engine.main
-```
-
-访问 `http://localhost:8000/docs` 查看接口文档。
+| 文档 | 说明 |
+|------|------|
+| [architecture.md](docs/architecture.md) | 系统架构设计：Mermaid 架构图、模块职责表、数据流、技术选型对比 |
+| [interview-guide.md](docs/interview-guide.md) | 面试叙事指南：每个模块的「公司实践 → 个人实现 → 差异认知」三层话术 |
+| [interview-qa-deepdive.md](docs/interview-qa-deepdive.md) | 深度学习文档：12 个模块的代码讲解 + 面试问答 + 方案对比 + 八股结合点 |
+| [tech-explained.md](docs/tech-explained.md) | 核心技术点详解：底层原理与实现细节补充 |
 
 ---
 
-> 本 README 为框架版，随各功能模块落地会持续补充实现细节与面试话术。
+## 环境变量说明
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `LLM_API_KEY` | LLM 服务 API Key（必填） | — |
+| `LLM_BASE_URL` | OpenAI 兼容 API 地址 | `https://api.deepseek.com/v1` |
+| `LLM_MODEL` | L1 轻量模型 | `deepseek-chat` |
+| `LLM_MODEL_L2` | L2 复杂推理模型（留空复用 L1） | — |
+| `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/0` |
+| `WORKSPACE_DIR` | Agent 文件操作沙箱目录 | `./workspace` |
+| `CONFIG_REFRESH_INTERVAL` | 动态配置轮询间隔(秒) | `30` |
+
+---
+
+## 核心设计理念
+
+1. **渐进式交付** — 不追求一步生成代码，通过四阶段 HITL 断点确保 AI 产出可控、可审、可回退
+2. **双栈协作** — Python 专注 AI 编排（异步高性能），Java 专注数据持久化（事务安全、生态成熟）
+3. **纵深防御** — 路由超时降级、记忆三层截断、MCP 三层容错、工具调用错误回传 LLM 自主决策
+4. **配置驱动** — 模型选择/轮次限制/工具列表均可热更新，无需重启服务
+
+---
+
+## License
+
+MIT
+
+---
+
+> 作者：lxy ｜ 技术栈：Python + Java 双栈 ｜ 编排引擎：LangGraph
