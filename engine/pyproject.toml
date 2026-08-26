@@ -28,6 +28,8 @@ dependencies = [
     "loguru>=0.7.0",
     # 向量检索（RAG 知识库）
     "faiss-cpu>=1.8.0",
+    "numpy>=1.26.0",
+    "langchain-text-splitters>=0.3.0",
     # MCP 协议
     "mcp>=1.0.0",
 ]

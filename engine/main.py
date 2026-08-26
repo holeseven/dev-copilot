@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 from loguru import logger
 
 from engine.config.settings import get_settings
@@ -77,11 +79,19 @@ def create_app() -> FastAPI:
         """健康检查：用于容器探活 / 负载均衡"""
         return {"status": "ok", "app": settings.app_name}
 
-    # ===== 业务路由挂载占位（后续任务实现后取消注释）=====
-    # from engine.api import chat, tasks, tools
-    # app.include_router(chat.router, prefix="/chat", tags=["chat"])
-    # app.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
-    # app.include_router(tools.router, prefix="/tools", tags=["tools"])
+    # ===== 业务路由挂载 =====
+    from engine.api import chat, tasks, tools
+    app.include_router(chat.router, prefix="/chat", tags=["chat"])
+    app.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
+    app.include_router(tools.router, prefix="/tools", tags=["tools"])
+
+    # ===== 静态前端首页 =====
+    _frontend_path = Path(__file__).parent / "frontend" / "index.html"
+
+    @app.get("/", tags=["frontend"], response_class=HTMLResponse)
+    async def serve_frontend():
+        """提供单文件前端聊天界面"""
+        return HTMLResponse(content=_frontend_path.read_text(encoding="utf-8"))
 
     return app
 
