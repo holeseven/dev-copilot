@@ -1,0 +1,7 @@
+# @author lxy
+# 排除构建产物与 IDE 文件（构建在容器内进行）
+target/
+*.iml
+.idea/
+.git/
+*.log

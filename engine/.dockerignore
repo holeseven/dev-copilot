@@ -1,0 +1,14 @@
+# @author lxy
+# 避免把本地虚拟环境/缓存/日志打进镜像
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+workspace/
+*.log
+.git/
+.env

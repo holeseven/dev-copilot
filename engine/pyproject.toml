@@ -3,8 +3,7 @@
 name = "dev-copilot-engine"
 version = "0.1.0"
 description = "AI 研发助手（Dev Copilot）Agent 引擎 —— FastAPI + LangGraph + Redis"
-readme = "../README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.9"
 authors = [{ name = "lxy" }]
 
 dependencies = [

@@ -1,6 +1,7 @@
 # @author lxy
-# Dev Copilot 一键启动：Redis + Python 引擎 +（Java 数据服务占位）
-version: "3.9"
+# Dev Copilot 一键启动：Redis + MySQL + Python 引擎 + Java 数据服务
+# 用法：在本文件所在目录执行  docker compose up -d --build
+# 首次启动 MySQL 会自动执行 schema.sql 建库建表（agent_db）。
 
 services:
   # ===== Redis：记忆存储 / CAS 抢占锁 / 任务队列 / 动态配置 =====
@@ -18,7 +19,27 @@ services:
       timeout: 3s
       retries: 5
 
-  # ===== Python Agent 引擎（核心）=====
+  # ===== MySQL：会话/记忆/配置持久化（agent_db，首次启动自动建表）=====
+  mysql:
+    image: mysql:8.0
+    container_name: dev-copilot-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: agent_db
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次初始化时自动执行建表脚本
+      - ./java-service/src/main/resources/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ===== Python Agent 引擎（核心，FastAPI + LangGraph）=====
   engine:
     build:
       context: ./engine
@@ -29,21 +50,33 @@ services:
     env_file:
       - .env
     environment:
-      # 容器内通过服务名访问 Redis
+      # 容器内通过服务名访问 Redis（覆盖 .env 里的 localhost）
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       redis:
         condition: service_healthy
 
-  # ===== Java 数据服务（占位：后续任务实现 Spring Boot + MyBatis-Plus）=====
-  # java-service:
-  #   build:
-  #     context: ./java-service
-  #   container_name: dev-copilot-java
-  #   ports:
-  #     - "8080:8080"
-  #   depends_on:
-  #     - redis
+  # ===== Java 数据服务（Spring Boot 3.2 + MyBatis-Plus）=====
+  java-service:
+    build:
+      context: ./java-service
+      dockerfile: Dockerfile
+    container_name: dev-copilot-java
+    ports:
+      - "8081:8081"
+    environment:
+      # 用容器服务名覆盖 application.yml 中的 localhost
+      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/agent_db?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=root
+      - SPRING_DATASOURCE_PASSWORD=root
+      - SPRING_DATA_REDIS_HOST=redis
+      - SPRING_DATA_REDIS_PORT=6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   redis-data:
+  mysql-data:
