@@ -1,0 +1,30 @@
+# @author lxy
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyc
+.venv/
+venv/
+env/
+.env
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== Java =====
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ===== 前端 / Node =====
+node_modules/
+dist/
+build/
+
+# ===== 通用 =====
+.DS_Store
+.idea/
+.vscode/
+*.log
