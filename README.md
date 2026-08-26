@@ -80,7 +80,89 @@ docker compose up -d --build
 # 健康检查：    curl http://localhost:8000/health
 ```
 
-> 本地开发：`cd engine && pip install -e . && python -m engine.main`（需本地 Redis）
+> 本地开发快捷命令：`cd engine && pip install -e . && python -m engine.main`（需本地 Redis）
+
+---
+
+## 开发者模式（中间件 Docker + 代码本地跑）
+
+### 适用场景
+
+日常开发、调试、频繁改代码时推荐此模式：
+- 代码改完秒生效（`--reload` 热重载）
+- 支持 IDE 断点调试（attach 本地进程）
+- 无需每次重新 build 镜像，迭代效率高
+
+### 前置要求
+
+| 依赖 | 版本 | 说明 |
+|------|------|------|
+| Python | ≥ 3.10（推荐 3.11） | Agent 引擎运行时 |
+| Docker & Compose | 最新稳定版 | 仅用于中间件容器 |
+| Java 17 | 可选 | 仅 Java 数据服务需要 |
+
+### 步骤
+
+#### 1. 只起中间件
+
+```bash
+docker compose up -d redis mysql
+```
+
+> 仅启动 Redis 和 MySQL 容器，Python/Java 服务在本地运行。
+
+#### 2. Python 引擎本地启动
+
+```bash
+cd engine
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e .
+cd ..  # 回到 agent/ 根目录
+uvicorn engine.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+- `--reload`：文件变更自动重启，开发必备
+- 确保 `.env` 中 `REDIS_URL` 指向 `redis://localhost:6379/0`
+
+#### 3. Java 服务本地启动（可选）
+
+```bash
+cd java-service
+mvn spring-boot:run
+```
+
+> 仅在需要数据持久化功能时启动，默认端口 8081。
+
+#### 4. 访问
+
+- 前端聊天界面：http://localhost:8000
+- API 文档：http://localhost:8000/docs
+- 健康检查：`curl http://localhost:8000/health`
+
+### 两种模式对比
+
+| 维度 | 全 Docker（方案 A） | 开发者模式（方案 B） |
+|------|---------------------|----------------------|
+| **启动方式** | `docker compose up -d --build` 一键全起 | 中间件容器 + 本地进程分开启动 |
+| **代码生效** | 需重新 build 镜像（~30s） | 秒级热重载（`--reload`） |
+| **调试支持** | 需额外配置 remote debug | 原生 IDE 断点调试 |
+| **环境一致性** | 接近生产环境，适合联调验收 | 依赖本地 Python/Java 版本 |
+| **资源占用** | 较高（所有服务容器化） | 较低（仅中间件容器化） |
+
+### 切换提示
+
+两种模式可随时切换：
+
+```bash
+# 停掉全部容器（从全 Docker 切到开发者模式）
+docker compose down
+
+# 只保留中间件（开发者模式）
+docker compose up -d redis mysql
+
+# 恢复全 Docker 模式
+docker compose up -d --build
+```
 
 ---
 
