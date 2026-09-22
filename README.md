@@ -189,20 +189,8 @@ agent/
 │   ├── orchestrator/            # LangGraph 编排（graph_builder / nodes）
 │   ├── api/                     # REST 路由（chat / tasks / tools）
 │   └── tests/                   # 单元测试
-├── java-service/                # Java 持久化服务（Spring Boot + MyBatis-Plus）
-└── docs/                        # 技术文档
+└── java-service/                # Java 持久化服务（Spring Boot + MyBatis-Plus）
 ```
-
----
-
-## 文档索引
-
-| 文档 | 说明 |
-|------|------|
-| [architecture.md](docs/architecture.md) | 系统架构设计：Mermaid 架构图、模块职责表、数据流、技术选型对比 |
-| [interview-guide.md](docs/interview-guide.md) | 面试叙事指南：每个模块的「公司实践 → 个人实现 → 差异认知」三层话术 |
-| [interview-qa-deepdive.md](docs/interview-qa-deepdive.md) | 深度学习文档：12 个模块的代码讲解 + 面试问答 + 方案对比 + 八股结合点 |
-| [tech-explained.md](docs/tech-explained.md) | 核心技术点详解：底层原理与实现细节补充 |
 
 ---
 
