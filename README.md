@@ -94,13 +94,11 @@ Compose 没有发布 Redis/MySQL 端口，所以不要使用 `docker compose up 
 
 ## Python 本地开发
 
-准备 Python 环境和宿主机可访问的 Redis，随后在仓库根目录运行：
+本地开发统一使用 Python 3.12 和 [uv](https://docs.astral.sh/uv/)，并需要宿主机可访问的 Redis。随后在仓库根目录运行：
 
 ```bash
-python -m venv engine/.venv
-# Linux/macOS: source engine/.venv/bin/activate
-# PowerShell:   engine\.venv\Scripts\Activate.ps1
-pip install -e "./engine[dev]"
+uv python install 3.12
+uv sync --project engine --frozen --extra dev
 
 # Linux/macOS 示例；PowerShell 请使用 $env:变量名="值"
 export LLM_API_KEY="你的Key"
@@ -108,7 +106,7 @@ export REDIS_URL="redis://127.0.0.1:6379/0"
 export WORKSPACE_ALLOWED_ROOTS='["/absolute/path/to/code"]'
 export WORKSPACE_METADATA_DIR="$HOME/.dev-copilot"
 
-uvicorn engine.main:app --reload --host 127.0.0.1 --port 8000
+uv run --project engine --frozen uvicorn engine.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 本地模式注册仓库时使用真实宿主路径，而不是 `/workspace`：
@@ -124,7 +122,7 @@ Windows 请求体可使用 `C:\\Users\\you\\code\\order-service`。所有仓库�
 运行 Python 测试：
 
 ```bash
-python -m pytest engine/tests -q
+uv run --project engine --frozen --extra dev pytest engine/tests -q
 ```
 
 ## 环境变量
