@@ -68,7 +68,10 @@ async def lifespan(app: FastAPI):
     finally:
         # 关闭阶段：逆序释放资源
         logger.info("正在关闭 {} ...", settings.app_name)
-        for manager in list(app.state.mcp_managers.values()):
+        async with app.state.workspace_manager_lock:
+            managers = list(app.state.mcp_managers.values())
+            app.state.mcp_managers.clear()
+        for manager in managers:
             await manager.shutdown()
         await dynamic_config.stop_refresh()
         await close_redis()
