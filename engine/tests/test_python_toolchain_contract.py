@@ -56,5 +56,9 @@ def test_readme_uses_uv_with_python_312_for_local_development() -> None:
     assert "uv python install 3.12" in readme
     assert "uv sync --project engine --frozen --extra dev" in readme
     assert "uv run --project engine --frozen uvicorn" in readme
-    assert "uv run --project engine --frozen --extra dev pytest" in readme
+    assert (
+        "uv run --project engine --frozen --extra dev python scripts/verify.py"
+        in readme
+    )
+    assert "uv run --project engine --frozen --extra dev pytest" not in readme
     assert "pip install -e" not in readme

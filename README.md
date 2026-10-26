@@ -119,10 +119,10 @@ curl -X POST http://127.0.0.1:8000/workspaces/local-dev/repositories \
 
 Windows 请求体可使用 `C:\\Users\\you\\code\\order-service`。所有仓库仍必须落在 `WORKSPACE_ALLOWED_ROOTS` 之内。
 
-运行 Python 测试：
+运行完整验证（Python、前端 Node 脚本和 Java 单元测试会按顺序执行，任一失败即停止）：
 
 ```bash
-uv run --project engine --frozen --extra dev pytest engine/tests -q
+uv run --project engine --frozen --extra dev python scripts/verify.py
 ```
 
 ## 环境变量
