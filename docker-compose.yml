@@ -71,7 +71,7 @@ services:
         target: /data/dev-copilot
     networks:
       - backend
-      - edge
+      - egress
     healthcheck:
       test:
         - CMD
@@ -105,7 +105,7 @@ services:
       DEV_COPILOT_ENGINE_BASE_URL: http://engine:8000
     networks:
       - backend
-      - edge
+      - frontend
     depends_on:
       mysql:
         condition: service_healthy
@@ -113,6 +113,35 @@ services:
         condition: service_healthy
       engine:
         condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: dev-copilot-web
+    ports:
+      - "127.0.0.1:3000:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      JAVA_BASE_URL: http://java-service:8081
+      PORT: 8080
+    networks:
+      - frontend
+    depends_on:
+      java-service:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/').then(r=>{if(!r.ok)process.exit(1)})"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
 volumes:
   redis-data:
@@ -122,4 +151,5 @@ volumes:
 networks:
   backend:
     internal: true
-  edge:
+  frontend:
+  egress:

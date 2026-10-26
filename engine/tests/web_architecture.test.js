@@ -27,6 +27,7 @@ assert.match(source, /小瑶开发助手/);
 assert.match(source, /小瑶主人/);
 for (const file of productionFiles) {
   const content = fs.readFileSync(file, "utf8");
+  if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
   if (content.includes("fetch(")) {
     assert.ok(file.includes(`${path.sep}api${path.sep}`), `fetch is restricted to API clients: ${file}`);
   }

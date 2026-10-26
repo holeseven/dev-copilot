@@ -28,14 +28,23 @@ def test_java_is_the_only_public_application_api() -> None:
     services = load_compose()["services"]
 
     assert "ports" not in services["engine"]
-    assert set(services["engine"]["networks"]) == {"backend", "edge"}
+    assert set(services["engine"]["networks"]) == {"backend", "egress"}
     assert services["java-service"]["ports"] == ["127.0.0.1:8081:8081"]
-    assert set(services["java-service"]["networks"]) == {"backend", "edge"}
+    assert set(services["java-service"]["networks"]) == {"backend", "frontend"}
     assert services["java-service"]["environment"][
         "DEV_COPILOT_ENGINE_BASE_URL"
     ] == "http://engine:8000"
     assert services["java-service"]["depends_on"]["engine"] == {
         "condition": "service_healthy"
+    }
+    assert services["web"]["ports"] == ["127.0.0.1:3000:8080"]
+    assert services["web"]["networks"] == ["frontend"]
+    assert "frontend" not in services["engine"]["networks"]
+    assert services["web"]["environment"]["JAVA_BASE_URL"] == (
+        "http://java-service:8081"
+    )
+    assert services["web"]["depends_on"]["java-service"] == {
+        "condition": "service_started"
     }
     assert services["engine"]["healthcheck"]["test"][0:3] == [
         "CMD",
@@ -143,12 +152,12 @@ def test_database_name_matches_the_fixed_schema_contract() -> None:
 
 def test_application_containers_are_read_only_and_images_run_as_non_root() -> None:
     compose = load_compose()
-    for service_name in ("engine", "java-service"):
+    for service_name in ("engine", "java-service", "web"):
         service = compose["services"][service_name]
         assert service["read_only"] is True
         assert service["tmpfs"] == ["/tmp"]
 
-    for dockerfile in ("engine/Dockerfile", "java-service/Dockerfile"):
+    for dockerfile in ("engine/Dockerfile", "java-service/Dockerfile", "web/Dockerfile"):
         text = (REPOSITORY_ROOT / dockerfile).read_text("utf-8")
         user_lines = [line.strip() for line in text.splitlines() if line.startswith("USER ")]
         assert user_lines

@@ -70,7 +70,7 @@ Windows Docker Desktop 可把允许根目录写成例如 `C:/Users/you/code`。�
 docker compose up -d --build
 ```
 
-当前容器版本尚未包含 React 页面；公开入口是 Java API：<http://127.0.0.1:8081/api/v1>。Python Engine 不发布宿主端口，只接受容器间调用，同时保留访问外部模型 API 的网络出口。
+启动完成后打开“小瑶开发助手”：<http://127.0.0.1:3000>。前端容器只代理版本化的 `/api/v1` 到 Java；Java API 仍可在 <http://127.0.0.1:8081/api/v1> 直接访问。两个入口都只绑定宿主机 loopback。Python Engine 不发布宿主端口，只接受容器间调用，同时保留访问外部模型 API 的网络出口。
 
 在 Docker 模式注册仓库时必须使用**容器路径**。若宿主目录 `${DEV_COPILOT_ALLOWED_ROOT}` 下有 `order-service`，请求应为：
 
