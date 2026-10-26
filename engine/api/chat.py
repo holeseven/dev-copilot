@@ -25,8 +25,8 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     """聊天请求体"""
     message: str = Field(..., min_length=1, description="用户消息")
-    session_id: str = Field(default="default", description="会话 ID")
-    workspace_id: Optional[str] = Field(default=None, description="Workspace ID")
+    session_id: str = Field(..., min_length=1, description="会话 ID")
+    workspace_id: str = Field(..., min_length=1, description="Workspace ID")
 
 
 class ResumeRequest(BaseModel):

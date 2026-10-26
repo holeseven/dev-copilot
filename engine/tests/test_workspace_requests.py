@@ -246,10 +246,14 @@ async def test_chat_and_tools_return_workspace_resolution_errors(tmp_path):
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        no_active_chat = await client.post("/chat", json={"message": "hello"})
         no_active_tools = await client.get("/tools")
         unknown_chat = await client.post(
-            "/chat", json={"message": "hello", "workspace_id": "missing"}
+            "/chat",
+            json={
+                "message": "hello",
+                "session_id": "session",
+                "workspace_id": "missing",
+            },
         )
         unknown_resume = await client.post(
             "/chat/resume",
@@ -257,7 +261,6 @@ async def test_chat_and_tools_return_workspace_resolution_errors(tmp_path):
         )
         unknown_tools = await client.get("/tools", params={"workspace_id": "missing"})
 
-    assert no_active_chat.status_code == 409
     assert no_active_tools.status_code == 409
     assert unknown_chat.status_code == 404
     assert unknown_resume.status_code == 404
