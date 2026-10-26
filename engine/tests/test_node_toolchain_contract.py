@@ -17,7 +17,15 @@ def test_root_package_exposes_the_supported_frontend_test_entry() -> None:
     assert package["scripts"]["test:frontend"] == (
         "node engine/tests/frontend_stream_switch.test.js"
     )
-    assert package["scripts"]["test"] == "npm run test:frontend"
+    assert package["scripts"]["test:web"] == "npm --prefix web test"
+    assert package["scripts"]["build:web"] == "npm --prefix web run build"
+    assert package["scripts"]["test:web:architecture"] == (
+        "node engine/tests/web_architecture.test.js"
+    )
+    assert package["scripts"]["test"] == (
+        "npm run test:frontend && npm run test:web && npm run build:web "
+        "&& npm run test:web:architecture"
+    )
     assert "dependencies" not in package
     assert "devDependencies" not in package
 

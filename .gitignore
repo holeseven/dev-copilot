@@ -23,6 +23,7 @@ target/
 node_modules/
 dist/
 build/
+*.tsbuildinfo
 
 # ===== 通用 =====
 .DS_Store

@@ -8,6 +8,9 @@
   },
   "scripts": {
     "test:frontend": "node engine/tests/frontend_stream_switch.test.js",
-    "test": "npm run test:frontend"
+    "test:web": "npm --prefix web test",
+    "build:web": "npm --prefix web run build",
+    "test:web:architecture": "node engine/tests/web_architecture.test.js",
+    "test": "npm run test:frontend && npm run test:web && npm run build:web && npm run test:web:architecture"
   }
 }

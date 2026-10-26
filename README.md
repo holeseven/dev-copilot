@@ -15,12 +15,12 @@
 - FastAPI 提供的单文件薄工作台，可在 Python 本地开发模式下切换 Workspace、注册仓库、扫描和发起只读问答；
 - Java 提供版本化的统一聊天 SSE 与 Workspace API，并在容器模式中作为唯一公开业务入口；
 - Java 到 Python 的 SSE 代理保留消息、工具和审批事件，区分连接前 HTTP 错误与流中失败，并向上游传播取消。
+- React 产品工作台“**小瑶开发助手**”：管理本地 Workspace、扫描项目、流式对话、查看工具施工记录，并可随时停止当前任务；页面只调用 Java `/api/v1`。
 
 下列能力仍在开发中，请不要把现有占位模块视为可用功能：
 
 - 可恢复、可审计的 HITL 受控代码修改闭环；
 - Workspace RAG 索引、增量更新与来源引用；
-- React 产品级工作台；
 - 面向多人或公网部署的认证、授权和租户隔离。
 
 因此，本版本只适合可信机器上的本地开发与评估。不要直接暴露到公网。
@@ -28,7 +28,7 @@
 ## 当前架构
 
 ```text
-浏览器 / API 客户端
+React 工作台 / API 客户端
        │ /api/v1 REST / SSE
        ▼
 Java Spring Boot ───────────── MySQL / Redis
@@ -121,6 +121,19 @@ curl -X POST http://127.0.0.1:8000/workspaces/local-dev/repositories \
 
 Windows 请求体可使用 `C:\\Users\\you\\code\\order-service`。所有仓库仍必须落在 `WORKSPACE_ALLOWED_ROOTS` 之内。
 
+## React 工作台本地开发
+
+先启动 Python Engine 和 Java 服务，确认 Java 可通过 `http://127.0.0.1:8081/api/v1` 访问；然后在仓库根目录运行：
+
+```bash
+npm ci --prefix web
+npm --prefix web run dev
+```
+
+打开终端输出的本地地址（默认 <http://127.0.0.1:5173>）。Vite 只把 `/api` 转发到 Java `8081`，浏览器不会直连 Python Engine。
+
+点击“添加 Workspace”可登记本地项目。浏览器目录选择器受安全模型限制，不能把绝对路径交给后端，因此页面只用它辅助填写仓库名称；仍需填写 **Java/Python 服务实际可访问的绝对路径**。Docker 模式下应填写 `/workspace/...`，本地进程模式下填写宿主机真实路径。源码不会被浏览器上传。
+
 运行完整验证（Python、前端 Node 脚本和 Java 单元测试会按顺序执行，任一失败即停止）：
 
 ```bash
@@ -161,7 +174,8 @@ dev-copilot/
 │   ├── orchestrator/         # 当前接入主链路的 LangGraph 图和节点
 │   ├── frontend/index.html   # 当前单文件薄工作台
 │   └── tests/
-└── java-service/             # Spring Boot 统一 API 与数据服务
+├── java-service/             # Spring Boot 统一 API 与数据服务
+└── web/                      # React 19 / TypeScript / Vite 产品工作台
 ```
 
 `engine/core/hitl`、`engine/core/rag`、`engine/core/openspec`、`engine/core/orchestrator` 和部分 `agents` 文件是实验或演进中的模块，目前未形成完整产品主链路。
