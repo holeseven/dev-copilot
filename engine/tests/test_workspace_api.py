@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -19,6 +21,7 @@ def _client(tmp_path):
     app.state.workspace_registry = WorkspaceRegistry(tmp_path / "metadata")
     app.state.workspace_scanner = WorkspaceScanner()
     app.state.mcp_managers = {}
+    app.state.workspace_manager_lock = asyncio.Lock()
     app.include_router(workspaces.router, prefix="/workspaces")
     return TestClient(app), app
 

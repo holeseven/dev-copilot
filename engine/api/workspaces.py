@@ -55,7 +55,8 @@ async def get_workspace_manager(request: Request, workspace: Workspace) -> MCPMa
 
 
 async def invalidate_workspace_manager(request: Request, workspace_id: str) -> None:
-    manager = request.app.state.mcp_managers.pop(workspace_id, None)
+    async with request.app.state.workspace_manager_lock:
+        manager = request.app.state.mcp_managers.pop(workspace_id, None)
     if manager is not None:
         await manager.shutdown()
 

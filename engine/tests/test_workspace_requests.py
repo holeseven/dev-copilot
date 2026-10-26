@@ -83,6 +83,103 @@ async def test_concurrent_manager_creation_reuses_one_initialized_instance(monke
     assert Manager.init_calls == 1
 
 
+def _controlled_manager(monkeypatch):
+    init_started = asyncio.Event()
+    release_init = asyncio.Event()
+
+    class Manager:
+        instances = []
+
+        def __init__(self, configs):
+            self.provider = configs[0]["provider"]
+            self.closed = False
+            type(self).instances.append(self)
+
+        async def init_all(self):
+            if len(type(self).instances) == 1:
+                init_started.set()
+                await release_init.wait()
+
+        async def shutdown(self):
+            self.closed = True
+
+    monkeypatch.setattr(workspaces, "MCPManager", Manager)
+    return Manager, init_started, release_init
+
+
+def _runtime_request(tmp_path):
+    registry = WorkspaceRegistry(tmp_path / "metadata")
+    state = SimpleNamespace(
+        workspace_registry=registry,
+        mcp_managers={},
+        workspace_manager_lock=asyncio.Lock(),
+    )
+    return SimpleNamespace(app=SimpleNamespace(state=state)), registry
+
+
+@pytest.mark.asyncio
+async def test_repository_add_invalidates_manager_created_during_initialization(
+    tmp_path, monkeypatch
+):
+    Manager, init_started, release_init = _controlled_manager(monkeypatch)
+    request, registry = _runtime_request(tmp_path)
+    workspace = registry.create("shared", "Shared")
+    repository = tmp_path / "new-repo"
+    repository.mkdir()
+
+    create_task = asyncio.create_task(
+        workspaces.get_workspace_manager(request, workspace)
+    )
+    await init_started.wait()
+    add_task = asyncio.create_task(
+        workspaces.add_repository(
+            "shared",
+            workspaces.RepositoryCreate(
+                name="new-repo", local_path=str(repository)
+            ),
+            request,
+        )
+    )
+    await asyncio.sleep(0)
+    release_init.set()
+    old_manager, updated_workspace = await asyncio.gather(create_task, add_task)
+
+    cached_after_invalidation = request.app.state.mcp_managers.get("shared")
+    assert cached_after_invalidation is None
+    assert old_manager.closed is True
+
+    new_manager = await workspaces.get_workspace_manager(request, updated_workspace)
+    assert new_manager is not old_manager
+    assert await new_manager.provider.call_tool("list_dir", {"path": "."}) == [
+        "new-repo"
+    ]
+    assert len(Manager.instances) == 2
+
+
+@pytest.mark.asyncio
+async def test_workspace_delete_closes_manager_created_during_initialization(
+    tmp_path, monkeypatch
+):
+    _, init_started, release_init = _controlled_manager(monkeypatch)
+    request, registry = _runtime_request(tmp_path)
+    workspace = registry.create("doomed", "Doomed")
+
+    create_task = asyncio.create_task(
+        workspaces.get_workspace_manager(request, workspace)
+    )
+    await init_started.wait()
+    delete_task = asyncio.create_task(
+        workspaces.delete_workspace("doomed", request)
+    )
+    await asyncio.sleep(0)
+    release_init.set()
+    old_manager, _ = await asyncio.gather(create_task, delete_task)
+
+    assert registry.get("doomed") is None
+    assert request.app.state.mcp_managers.get("doomed") is None
+    assert old_manager.closed is True
+
+
 @pytest.mark.asyncio
 async def test_tools_resolves_active_and_explicit_workspaces(tmp_path):
     app = _app(tmp_path)
