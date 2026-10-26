@@ -12,14 +12,15 @@
 - 在一个 Workspace 中注册多个仓库，扫描语言、构建系统、服务、中间件、显式依赖和 Git 信息；
 - 按 Workspace 隔离 `list_dir`、`find_files`、`grep_code`、`read_file`、`code_search` 五个只读工具；
 - LangGraph 模型/工具循环和 SSE token、工具状态事件；
-- FastAPI 提供的单文件薄工作台，可切换 Workspace、注册仓库、扫描和发起只读问答；
-- Java 服务提供会话、记忆和配置的数据读写接口，但它目前**不是浏览器统一入口**，前端仍直接连接 Python FastAPI。
+- FastAPI 提供的单文件薄工作台，可在 Python 本地开发模式下切换 Workspace、注册仓库、扫描和发起只读问答；
+- Java 提供版本化的统一聊天 SSE 与 Workspace API，并在容器模式中作为唯一公开业务入口；
+- Java 到 Python 的 SSE 代理保留消息、工具和审批事件，区分连接前 HTTP 错误与流中失败，并向上游传播取消。
 
 下列能力仍在开发中，请不要把现有占位模块视为可用功能：
 
 - 可恢复、可审计的 HITL 受控代码修改闭环；
 - Workspace RAG 索引、增量更新与来源引用；
-- React 产品级工作台以及由 Java 统一代理浏览器 API/SSE；
+- React 产品级工作台；
 - 面向多人或公网部署的认证、授权和租户隔离。
 
 因此，本版本只适合可信机器上的本地开发与评估。不要直接暴露到公网。
@@ -27,20 +28,20 @@
 ## 当前架构
 
 ```text
-浏览器薄工作台
-       │ REST / SSE
+浏览器 / API 客户端
+       │ /api/v1 REST / SSE
+       ▼
+Java Spring Boot ───────────── MySQL / Redis
+       │ 内部 REST / SSE
        ▼
 Python FastAPI + LangGraph ── Workspace Registry / Scanner
        │                    └─ 每个 Workspace 独立的只读工具运行时
        └─ Redis（动态配置与现有基础设施）
-
-Java Spring Boot ── MySQL / Redis
-  └─ 独立的数据服务；尚未接管浏览器入口，也尚未成为 Python 主链路的可靠持久化层
 ```
 
 ## 安全边界
 
-- Python 本地启动默认监听 `127.0.0.1`；Compose 也只把 Engine 和 Java 映射到宿主机 loopback。
+- Python 本地开发默认监听 `127.0.0.1`；Compose 不发布 Engine 端口，只把 Java 映射到宿主机 loopback。
 - Redis 与 MySQL 只加入 Compose 内部网络，不发布宿主端口。
 - `DEV_COPILOT_ALLOWED_ROOT` 以只读方式挂载为容器内 `/workspace`；注册表等可写元数据保存在独立 `engine-metadata` volume。
 - 仓库注册路径可以是绝对宿主机/容器路径，但必须位于明确的允许根目录内。注册后，只读工具仅接受仓库内的虚拟相对路径，并拒绝绝对路径、盘符/UNC 路径、`..` 越界、损坏链接，以及通过 symlink/junction（Windows reparse point）逃逸；无法检查或解析时 fail closed。
@@ -69,25 +70,26 @@ Windows Docker Desktop 可把允许根目录写成例如 `C:/Users/you/code`。�
 docker compose up -d --build
 ```
 
-访问地址：
-
-- 小瑶薄工作台：<http://127.0.0.1:8000>
-- Python API 文档：<http://127.0.0.1:8000/docs>
-- Java 数据服务 API 前缀：<http://127.0.0.1:8081/api/v1/agent>
+当前容器版本尚未包含 React 页面；公开入口是 Java API：<http://127.0.0.1:8081/api/v1>。Python Engine 不发布宿主端口，只接受容器间调用，同时保留访问外部模型 API 的网络出口。
 
 在 Docker 模式注册仓库时必须使用**容器路径**。若宿主目录 `${DEV_COPILOT_ALLOWED_ROOT}` 下有 `order-service`，请求应为：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/workspaces \
+curl -X POST http://127.0.0.1:8081/api/v1/workspaces \
   -H "Content-Type: application/json" \
   -d '{"id":"local-dev","name":"Local Dev"}'
 
-curl -X POST http://127.0.0.1:8000/workspaces/local-dev/repositories \
+curl -X POST http://127.0.0.1:8081/api/v1/workspaces/local-dev/repositories \
   -H "Content-Type: application/json" \
   -d '{"name":"order-service","local_path":"/workspace/order-service"}'
 
-curl -X POST http://127.0.0.1:8000/workspaces/local-dev/scan
-curl -X POST http://127.0.0.1:8000/workspaces/local-dev/activate
+curl -X POST http://127.0.0.1:8081/api/v1/workspaces/local-dev/scan
+curl -X POST http://127.0.0.1:8081/api/v1/workspaces/local-dev/activate
+
+curl -N -X POST http://127.0.0.1:8081/api/v1/agent/chat \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"message":"分析项目入口","session_id":"demo-1","workspace_id":"local-dev"}'
 ```
 
 Compose 没有发布 Redis/MySQL 端口，所以不要使用 `docker compose up redis mysql` 后再让宿主机进程连接它们。当前本地进程开发需自行提供 `localhost` Redis/MySQL；项目后续会提供单独的开发 override。
@@ -132,6 +134,7 @@ uv run --project engine --frozen --extra dev python scripts/verify.py
 | `DEV_COPILOT_MYSQL_ROOT_PASSWORD` | Compose 初始化 MySQL root 密码 | Compose 必填 |
 | `DEV_COPILOT_DB_USERNAME` | Java 应用数据库账户 | `dev_copilot` |
 | `DEV_COPILOT_DB_PASSWORD` | Java 应用数据库密码 | Compose 必填 |
+| `DEV_COPILOT_ENGINE_BASE_URL` | Java 访问 Python Engine 的内部地址 | 本地 `http://127.0.0.1:8000`；Compose 固定为 `http://engine:8000` |
 | `DEV_COPILOT_ALLOWED_ROOT` | Compose 允许读取的宿主代码根目录 | Compose 必填、只读挂载 |
 | `LLM_API_KEY` | OpenAI 兼容模型 Key | 实际问答必填 |
 | `LLM_BASE_URL` | OpenAI 兼容接口地址 | `https://api.deepseek.com/v1` |
@@ -158,17 +161,16 @@ dev-copilot/
 │   ├── orchestrator/         # 当前接入主链路的 LangGraph 图和节点
 │   ├── frontend/index.html   # 当前单文件薄工作台
 │   └── tests/
-└── java-service/             # Spring Boot 会话/记忆/配置数据服务
+└── java-service/             # Spring Boot 统一 API 与数据服务
 ```
 
 `engine/core/hitl`、`engine/core/rag`、`engine/core/openspec`、`engine/core/orchestrator` 和部分 `agents` 文件是实验或演进中的模块，目前未形成完整产品主链路。
 
 ## API 使用提示
 
-- `GET /tools?workspace_id=local-dev` 返回当前 Workspace 的只读工具 schema。
-- `POST /chat` 需要 `message`、`session_id` 和 `workspace_id`，通过 SSE 返回消息与工具状态。
-- 未显式传 `workspace_id` 时会使用 active Workspace；没有 active Workspace 会返回冲突错误。
-- `POST /chat/resume` 已有接口骨架，但当前图没有持久化 checkpointer，不能视为可靠的跨请求 HITL 恢复能力。
+- 公开 Workspace 接口位于 Java `/api/v1/workspaces`；创建、查询、删除、注册仓库、扫描和激活操作由 Java 转发到内部 Python Engine。
+- `POST /api/v1/agent/chat` 必须提供 `message`、`session_id` 和 `workspace_id`，通过 SSE 返回消息、工具状态和审批事件。
+- Python 的 `/chat/resume` 仍只是内部接口骨架；当前图没有持久化 checkpointer，不能视为可靠的跨请求 HITL 恢复能力。
 
 ## License
 

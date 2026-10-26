@@ -24,13 +24,25 @@ def test_datastores_are_private_on_an_internal_backend_network() -> None:
         assert service["networks"] == ["backend"]
 
 
-def test_application_ports_are_bound_to_loopback_and_use_edge_network() -> None:
+def test_java_is_the_only_public_application_api() -> None:
     services = load_compose()["services"]
 
-    assert services["engine"]["ports"] == ["127.0.0.1:8000:8000"]
+    assert "ports" not in services["engine"]
+    assert set(services["engine"]["networks"]) == {"backend", "edge"}
     assert services["java-service"]["ports"] == ["127.0.0.1:8081:8081"]
-    for service_name in ("engine", "java-service"):
-        assert set(services[service_name]["networks"]) == {"backend", "edge"}
+    assert set(services["java-service"]["networks"]) == {"backend", "edge"}
+    assert services["java-service"]["environment"][
+        "DEV_COPILOT_ENGINE_BASE_URL"
+    ] == "http://engine:8000"
+    assert services["java-service"]["depends_on"]["engine"] == {
+        "condition": "service_healthy"
+    }
+    assert services["engine"]["healthcheck"]["test"][0:3] == [
+        "CMD",
+        "python",
+        "-c",
+    ]
+    assert "127.0.0.1:8000/health" in services["engine"]["healthcheck"]["test"][3]
 
 
 def test_mysql_credentials_must_be_injected_and_java_never_defaults_to_root() -> None:
