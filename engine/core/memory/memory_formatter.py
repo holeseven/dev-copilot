@@ -67,6 +67,8 @@ class MemoryFormatter:
         """
         if not records:
             return []
+        if last_n == 0:
+            return []
 
         # 第一层截断：仅保留最近 last_n 轮
         truncated_records = records[-last_n:] if len(records) > last_n else records
@@ -164,4 +166,4 @@ class MemoryFormatter:
             role_label = "User" if msg["role"] == "user" else "Assistant"
             lines.append(f"{role_label}: {msg['content']}")
 
-        return "\n".join(lines)
+        return "\n".join(lines)[:self.max_total_len]

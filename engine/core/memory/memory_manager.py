@@ -20,7 +20,7 @@ class MemoryManager:
     async def _ensure_redis(self):
         """确保 Redis 连接已初始化。"""
         if self._redis is None:
-            self._redis = await get_redis()
+            self._redis = get_redis()
         return self._redis
 
     async def add_turn(self, session_id: str, question: str, answer: str) -> None:

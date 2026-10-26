@@ -43,12 +43,14 @@ class TaskState(str, enum.Enum):
 # Lua 脚本：原子 SETNX + PEXPIRE
 # ──────────────────────────────────────────────
 _CLAIM_SCRIPT = """
-local key = KEYS[1]
+local lock_key = KEYS[1]
+local state_key = KEYS[2]
 local owner = ARGV[1]
 local ttl = tonumber(ARGV[2])
-if redis.call("EXISTS", key) == 0 then
-    redis.call("SET", key, owner)
-    redis.call("PEXPIRE", key, ttl)
+if redis.call("EXISTS", lock_key) == 0 then
+    redis.call("SET", lock_key, owner)
+    redis.call("PEXPIRE", lock_key, ttl)
+    redis.call("SET", state_key, "CLAIMED")
     return 1
 end
 return 0
@@ -75,6 +77,30 @@ if redis.call("GET", key) == owner then
     return 1
 end
 return 0
+"""
+
+_TRANSITION_SCRIPT = """
+local lock_key = KEYS[1]
+local state_key = KEYS[2]
+local owner = ARGV[1]
+local target = ARGV[2]
+if redis.call("GET", lock_key) ~= owner then
+    return -1
+end
+local current = redis.call("GET", state_key) or "INIT"
+local valid = false
+if current == "INIT" then
+    valid = target == "CLAIMED"
+elseif current == "CLAIMED" then
+    valid = target == "RUNNING" or target == "FAILED"
+elseif current == "RUNNING" then
+    valid = target == "COMPLETED" or target == "FAILED"
+end
+if not valid then
+    return 0
+end
+redis.call("SET", state_key, target)
+return 1
 """
 
 
@@ -118,11 +144,14 @@ class TaskLock:
         """
         redis: aioredis.Redis = get_redis()
         result = await redis.eval(
-            _CLAIM_SCRIPT, 1, self._lock_key, self.owner, str(self.ttl_ms)
+            _CLAIM_SCRIPT,
+            2,
+            self._lock_key,
+            self._state_key,
+            self.owner,
+            str(self.ttl_ms),
         )
         if result == 1:
-            # 抢占成功，初始化状态为 CLAIMED
-            await redis.set(self._state_key, TaskState.CLAIMED.value)
             logger.info(
                 "[TaskLock] 抢占成功 task_id={} owner={}", self.task_id, self.owner
             )
@@ -168,34 +197,29 @@ class TaskLock:
 
     # ──────────── 状态机流转 ────────────
 
-    _VALID_TRANSITIONS: dict[TaskState, set[TaskState]] = {
-        TaskState.INIT: {TaskState.CLAIMED},
-        TaskState.CLAIMED: {TaskState.RUNNING, TaskState.FAILED},
-        TaskState.RUNNING: {TaskState.COMPLETED, TaskState.FAILED},
-        # 终态不可再迁移
-        TaskState.COMPLETED: set(),
-        TaskState.FAILED: set(),
-    }
-
     async def transition(self, target: TaskState) -> None:
         """
         流转任务状态（合法性校验 + Redis 持久化）。
 
         Raises:
+            PermissionError — 当前 owner 不持有任务锁
             ValueError — 非法流转
         """
         redis: aioredis.Redis = get_redis()
-        current_raw = await redis.get(self._state_key)
-        current = TaskState(current_raw) if current_raw else TaskState.INIT
-
-        if target not in self._VALID_TRANSITIONS.get(current, set()):
-            raise ValueError(
-                f"非法状态流转: {current.value} → {target.value} (task_id={self.task_id})"
-            )
-        await redis.set(self._state_key, target.value)
+        result = await redis.eval(
+            _TRANSITION_SCRIPT,
+            2,
+            self._lock_key,
+            self._state_key,
+            self.owner,
+            target.value,
+        )
+        if result == -1:
+            raise PermissionError(f"任务锁不属于当前 owner (task_id={self.task_id})")
+        if result != 1:
+            raise ValueError(f"非法状态流转到 {target.value} (task_id={self.task_id})")
         logger.info(
-            "[TaskLock] 状态流转 {} → {} task_id={}",
-            current.value,
+            "[TaskLock] 状态流转到 {} task_id={}",
             target.value,
             self.task_id,
         )

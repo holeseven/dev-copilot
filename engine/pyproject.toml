@@ -44,7 +44,17 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["engine"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["engine", "engine.*"]
+
+[tool.setuptools.package-data]
+engine = [
+    "frontend/index.html",
+    "core/openspec/templates/*.md",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -164,29 +164,37 @@ class AgentDispatcher:
             if any(kw in query_lower for kw in keywords):
                 # 找到对应 candidate 的 index
                 idx = self._find_agent_index(agent_id)
+                if idx is None:
+                    return self._fallback_decision()
+                target = self._config.candidates[idx]
                 return RoutingDecision(
                     routing_type="direct",
-                    target_agent_id=agent_id,
+                    target_agent_id=target.agent_id,
                     target_agent_index=idx,
                     complexity_level="L2",
                 )
 
         # 完全无法匹配 → fallback
-        fallback_id = self._config.fallback_agent_id
-        fallback_idx = self._find_agent_index(fallback_id)
+        return self._fallback_decision()
+
+    def _fallback_decision(self) -> RoutingDecision:
+        fallback_idx = self._find_agent_index(self._config.fallback_agent_id)
+        if fallback_idx is None:
+            raise ValueError("Dispatcher fallback agent is not configured")
+        fallback = self._config.candidates[fallback_idx]
         return RoutingDecision(
             routing_type="direct",
-            target_agent_id=fallback_id,
+            target_agent_id=fallback.agent_id,
             target_agent_index=fallback_idx,
             complexity_level="L2",
         )
 
-    def _find_agent_index(self, agent_id: str) -> int:
+    def _find_agent_index(self, agent_id: str) -> Optional[int]:
         """根据 agent_id 查找其在候选列表中的索引"""
         for i, candidate in enumerate(self._config.candidates):
             if candidate.agent_id == agent_id:
                 return i
-        return 0  # 找不到则默认第一个
+        return None
 
     def _format_agent_list(self) -> str:
         """将候选 Agent 列表格式化为 prompt 中可阅读的文本"""
