@@ -71,3 +71,16 @@ def test_registry_allows_one_path_in_different_workspaces(tmp_path):
     registry.add_repository(second.id, "api", source)
 
     assert registry.get(first.id).repositories[0].path == registry.get(second.id).repositories[0].path
+
+
+def test_registry_rejects_workspace_ids_that_escape_metadata_root(tmp_path):
+    registry = WorkspaceRegistry(root=tmp_path / "registry")
+    external = tmp_path / "external"
+    external.mkdir()
+
+    for workspace_id in ("../../external", str(external), ".", ".."):
+        with pytest.raises(ValueError, match="workspace id"):
+            registry.create(workspace_id, "outside")
+
+    assert external.is_dir()
+    assert list(external.iterdir()) == []

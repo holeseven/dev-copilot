@@ -47,7 +47,7 @@ class LocalDevToolProvider(ToolProvider):
         from engine.core.mcp.dev_tools.file_tools import list_dir
         try:
             return [
-                self._virtual_entry(repository.name, entry)
+                self._virtual_entry(repository.name, relative, entry)
                 for entry in list_dir(relative, workspace_dir=repository.path)
             ]
         except FileNotFoundError:
@@ -114,5 +114,9 @@ class LocalDevToolProvider(ToolProvider):
         return f"{repository_name}/{Path(path).as_posix()}"
 
     @staticmethod
-    def _virtual_entry(repository_name: str, entry: str) -> str:
-        return f"{repository_name}/{entry.replace(chr(92), '/')}"
+    def _virtual_entry(repository_name: str, directory: str, entry: str) -> str:
+        parts = [repository_name]
+        if directory != ".":
+            parts.append(Path(directory).as_posix())
+        parts.append(entry.replace(chr(92), "/"))
+        return "/".join(parts)

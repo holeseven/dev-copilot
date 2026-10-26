@@ -12,6 +12,8 @@ def _workspace(tmp_path):
     for directory in (api, web, sibling):
         directory.mkdir()
     (api / "main.py").write_text("needle = 'api'\n", encoding="utf-8")
+    (api / "subdir").mkdir()
+    (api / "subdir" / "nested.py").write_text("needle = 'nested'\n", encoding="utf-8")
     (web / "index.js").write_text("const needle = 'web';\n", encoding="utf-8")
     (sibling / "secret.txt").write_text("secret\n", encoding="utf-8")
     return Workspace(
@@ -45,17 +47,35 @@ async def test_local_provider_uses_virtual_root_for_multi_repository_reads_and_s
 
     assert await provider.call_tool("list_dir", {"path": "."}) == ["api", "web"]
     api_entries = await provider.call_tool("list_dir", {"path": "api"})
-    assert api_entries == ["api/main.py"]
+    assert api_entries == ["api/main.py", "api/subdir/"]
     assert await provider.call_tool("read_file", {"path": api_entries[0]}) == "needle = 'api'\n"
     assert await provider.call_tool("read_file", {"path": "api/main.py"}) == "needle = 'api'\n"
-    assert await provider.call_tool("find_files", {"glob_pattern": "*.py", "path": "."}) == ["api/main.py"]
+    assert await provider.call_tool("find_files", {"glob_pattern": "*.py", "path": "."}) == [
+        "api/main.py",
+        "api/subdir/nested.py",
+    ]
     assert await provider.call_tool("grep_code", {"pattern": "needle", "path": "."}) == [
         "api/main.py:1:needle = 'api'",
+        "api/subdir/nested.py:1:needle = 'nested'",
         "web/index.js:1:const needle = 'web';",
     ]
     search = await provider.call_tool("code_search", {"pattern": "needle", "path": "."})
-    assert [item["file"] for item in search["matches"]] == ["api/main.py", "web/index.js"]
+    assert [item["file"] for item in search["matches"]] == [
+        "api/main.py",
+        "api/subdir/nested.py",
+        "web/index.js",
+    ]
     assert str(tmp_path) not in str(search)
+
+
+@pytest.mark.asyncio
+async def test_local_provider_preserves_nested_directory_in_listed_virtual_paths(tmp_path):
+    provider = LocalDevToolProvider("local", _workspace(tmp_path))
+
+    entries = await provider.call_tool("list_dir", {"path": "api/subdir"})
+
+    assert entries == ["api/subdir/nested.py"]
+    assert await provider.call_tool("read_file", {"path": entries[0]}) == "needle = 'nested'\n"
 
 
 @pytest.mark.asyncio

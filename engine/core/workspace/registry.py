@@ -21,6 +21,7 @@ class WorkspaceRegistry:
         self._workspaces = self._load_workspaces()
 
     def create(self, workspace_id: str, name: str) -> Workspace:
+        self._workspace_path(workspace_id)
         if workspace_id in self._workspaces:
             raise ValueError(f"workspace already exists: {workspace_id}")
         workspace = Workspace(id=workspace_id, name=name)
@@ -37,8 +38,9 @@ class WorkspaceRegistry:
     def delete(self, workspace_id: str) -> bool:
         if workspace_id not in self._workspaces:
             return False
+        workspace_path = self._workspace_path(workspace_id)
         del self._workspaces[workspace_id]
-        rmtree(self._workspace_path(workspace_id))
+        rmtree(workspace_path)
         active = self._read_active_id()
         if active == workspace_id:
             self._active_file.unlink(missing_ok=True)
@@ -65,6 +67,7 @@ class WorkspaceRegistry:
         return workspace
 
     def save(self, workspace: Workspace) -> Workspace:
+        self._workspace_path(workspace.id)
         self._workspaces[workspace.id] = workspace
         self._write_workspaces()
         return workspace
@@ -101,4 +104,8 @@ class WorkspaceRegistry:
         return self._active_file.read_text(encoding="utf-8").strip() or None
 
     def _workspace_path(self, workspace_id: str) -> Path:
-        return self._workspaces_root / workspace_id
+        root = self._workspaces_root.resolve()
+        candidate = (root / workspace_id).resolve()
+        if candidate.parent != root:
+            raise ValueError(f"workspace id must name a direct metadata directory: {workspace_id}")
+        return candidate
