@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from shutil import rmtree
 from typing import List, Optional, Union
-from uuid import uuid4
 
 import yaml
 
@@ -15,12 +15,15 @@ class WorkspaceRegistry:
     def __init__(self, root: Optional[Union[str, Path]] = None):
         self.root = Path(root).expanduser() if root is not None else Path.home() / ".dev-copilot"
         self.root.mkdir(parents=True, exist_ok=True)
-        self._workspace_file = self.root / "workspace.yaml"
-        self._active_file = self.root / "active.yaml"
+        self._workspaces_root = self.root / "workspaces"
+        self._workspaces_root.mkdir(exist_ok=True)
+        self._active_file = self.root / "active_workspace"
         self._workspaces = self._load_workspaces()
 
-    def create(self, name: str) -> Workspace:
-        workspace = Workspace(id=str(uuid4()), name=name)
+    def create(self, workspace_id: str, name: str) -> Workspace:
+        if workspace_id in self._workspaces:
+            raise ValueError(f"workspace already exists: {workspace_id}")
+        workspace = Workspace(id=workspace_id, name=name)
         self._workspaces[workspace.id] = workspace
         self.save(workspace)
         return workspace
@@ -35,7 +38,7 @@ class WorkspaceRegistry:
         if workspace_id not in self._workspaces:
             return False
         del self._workspaces[workspace_id]
-        self._write_workspaces()
+        rmtree(self._workspace_path(workspace_id))
         active = self._read_active_id()
         if active == workspace_id:
             self._active_file.unlink(missing_ok=True)
@@ -43,7 +46,7 @@ class WorkspaceRegistry:
 
     def set_active(self, workspace_id: str) -> Workspace:
         workspace = self._require(workspace_id)
-        self._active_file.write_text(yaml.safe_dump({"id": workspace.id}, sort_keys=True), encoding="utf-8")
+        self._active_file.write_text(workspace.id, encoding="utf-8")
         return workspace
 
     def get_active(self) -> Optional[Workspace]:
@@ -73,20 +76,29 @@ class WorkspaceRegistry:
         return workspace
 
     def _load_workspaces(self) -> dict[str, Workspace]:
-        if not self._workspace_file.exists():
-            return {}
-        content = yaml.safe_load(self._workspace_file.read_text(encoding="utf-8")) or {}
         return {
-            item["id"]: Workspace.model_validate(item)
-            for item in content.get("workspaces", [])
+            workspace.id: workspace
+            for workspace in (
+                Workspace.model_validate(
+                    yaml.safe_load(workspace_file.read_text(encoding="utf-8")) or {}
+                )
+                for workspace_file in sorted(self._workspaces_root.glob("*/workspace.yaml"))
+            )
         }
 
     def _write_workspaces(self) -> None:
-        payload = {"workspaces": [workspace.model_dump(mode="json") for workspace in self.list()]}
-        self._workspace_file.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        for workspace in self.list():
+            workspace_file = self._workspace_path(workspace.id) / "workspace.yaml"
+            workspace_file.parent.mkdir(parents=True, exist_ok=True)
+            workspace_file.write_text(
+                yaml.safe_dump(workspace.model_dump(mode="json"), allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
 
     def _read_active_id(self) -> Optional[str]:
         if not self._active_file.exists():
             return None
-        content = yaml.safe_load(self._active_file.read_text(encoding="utf-8")) or {}
-        return content.get("id")
+        return self._active_file.read_text(encoding="utf-8").strip() or None
+
+    def _workspace_path(self, workspace_id: str) -> Path:
+        return self._workspaces_root / workspace_id

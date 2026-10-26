@@ -10,7 +10,7 @@ def test_registry_round_trip_preserves_workspace_and_repositories(tmp_path):
     source.mkdir()
     registry = WorkspaceRegistry(root=tmp_path / "registry")
 
-    workspace = registry.create("demo")
+    workspace = registry.create("order-platform", "demo")
     registry.add_repository(workspace.id, "service", source)
 
     restored = WorkspaceRegistry(root=tmp_path / "registry")
@@ -20,31 +20,35 @@ def test_registry_round_trip_preserves_workspace_and_repositories(tmp_path):
     assert [(repo.name, repo.path) for repo in loaded.repositories] == [
         ("service", str(source.resolve()))
     ]
+    assert (tmp_path / "registry" / "workspaces" / "order-platform" / "workspace.yaml").is_file()
 
 
 def test_registry_active_switch_and_delete_clears_active_without_deleting_source(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     registry = WorkspaceRegistry(root=tmp_path / "registry")
-    first = registry.create("first")
-    second = registry.create("second")
+    first = registry.create("first", "first")
+    second = registry.create("second", "second")
     registry.add_repository(first.id, "source", source)
 
     registry.set_active(first.id)
     assert registry.get_active().id == first.id
     registry.set_active(second.id)
     assert registry.get_active().id == second.id
+    assert (tmp_path / "registry" / "active_workspace").read_text(encoding="utf-8") == "second"
 
     registry.delete(second.id)
 
     assert registry.get_active() is None
+    assert not (tmp_path / "registry" / "active_workspace").exists()
+    assert not (tmp_path / "registry" / "workspaces" / "second").exists()
     assert source.is_dir()
     assert [workspace.id for workspace in registry.list()] == [first.id]
 
 
 def test_registry_rejects_missing_repository_and_duplicate_names_per_workspace(tmp_path):
     registry = WorkspaceRegistry(root=tmp_path / "registry")
-    workspace = registry.create("demo")
+    workspace = registry.create("demo", "demo")
     existing = tmp_path / "existing"
     existing.mkdir()
 
@@ -60,8 +64,8 @@ def test_registry_allows_one_path_in_different_workspaces(tmp_path):
     source = tmp_path / "shared"
     source.mkdir()
     registry = WorkspaceRegistry(root=tmp_path / "registry")
-    first = registry.create("first")
-    second = registry.create("second")
+    first = registry.create("first", "first")
+    second = registry.create("second", "second")
 
     registry.add_repository(first.id, "api", source)
     registry.add_repository(second.id, "api", source)

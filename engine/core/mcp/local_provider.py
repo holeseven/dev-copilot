@@ -45,7 +45,13 @@ class LocalDevToolProvider(ToolProvider):
             return sorted(self._repositories)
         repository, relative = self._repository_for_path(path)
         from engine.core.mcp.dev_tools.file_tools import list_dir
-        return list_dir(relative, workspace_dir=repository.path)
+        try:
+            return [
+                self._virtual_entry(repository.name, entry)
+                for entry in list_dir(relative, workspace_dir=repository.path)
+            ]
+        except FileNotFoundError:
+            raise FileNotFoundError(f"directory not found: {path}") from None
 
     def _find_files(self, glob_pattern: str, path: str) -> List[str]:
         from engine.core.mcp.dev_tools.file_tools import find_files
@@ -58,7 +64,10 @@ class LocalDevToolProvider(ToolProvider):
     def _read_file(self, path: str, start_line: Optional[int], end_line: Optional[int]) -> str:
         repository, relative = self._repository_for_path(path)
         from engine.core.mcp.dev_tools.file_tools import read_file
-        return read_file(relative, start_line, end_line, workspace_dir=repository.path)
+        try:
+            return read_file(relative, start_line, end_line, workspace_dir=repository.path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"file not found: {path}") from None
 
     async def _code_search(self, pattern: str, path: str, file_glob: str, max_results: int) -> Dict[str, Any]:
         from engine.core.mcp.code_search_server import CodeSearchServer
@@ -66,6 +75,8 @@ class LocalDevToolProvider(ToolProvider):
         for repository, relative in self._paths_for(path):
             result = await CodeSearchServer(workspace_dir=repository.path).tools_call("code_search", {"pattern": pattern, "path": relative, "file_glob": file_glob, "max_results": max_results})
             if result.get("error"):
+                if "路径不存在" in result["error"]:
+                    return {"error": f"path does not exist: {self._virtual_path(repository.name, relative)}", "matches": []}
                 return result
             matches.extend({**match, "file": self._virtual_path(repository.name, match["file"])} for match in result["matches"])
         matches.sort(key=lambda match: (match["file"], match["line_number"], match["content"]))
@@ -101,3 +112,7 @@ class LocalDevToolProvider(ToolProvider):
     @staticmethod
     def _virtual_path(repository_name: str, path: str) -> str:
         return f"{repository_name}/{Path(path).as_posix()}"
+
+    @staticmethod
+    def _virtual_entry(repository_name: str, entry: str) -> str:
+        return f"{repository_name}/{entry.replace(chr(92), '/')}"

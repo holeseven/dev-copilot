@@ -185,10 +185,12 @@ class WorkspaceScanner:
         if name:
             services.add(str(name))
             record(source, "spring.application.name")
-        for key in self._flatten_keys(config):
+        for key, value in self._flatten_items(config):
             self._add_middleware(key, middleware)
-        if middleware:
-            record(source, "configuration")
+            if isinstance(value, str):
+                self._add_middleware(value, middleware)
+            if self._matches_middleware(key) or (isinstance(value, str) and self._matches_middleware(value)):
+                record(source, key)
 
     def _scan_compose(self, root, services, middleware, dependencies, record) -> None:
         path = next((candidate for candidate in (root / "docker-compose.yml", root / "docker-compose.yaml") if candidate.is_file()), None)
@@ -220,16 +222,20 @@ class WorkspaceScanner:
         return child.text.strip() if child is not None and child.text else ""
 
     @staticmethod
-    def _flatten_keys(value: Any, prefix: str = "") -> Iterable[str]:
+    def _flatten_items(value: Any, prefix: str = "") -> Iterable[tuple[str, Any]]:
         if isinstance(value, dict):
             for key, nested in value.items():
                 full_key = f"{prefix}.{key}" if prefix else str(key)
-                yield full_key
-                yield from WorkspaceScanner._flatten_keys(nested, full_key)
+                yield full_key, nested
+                yield from WorkspaceScanner._flatten_items(nested, full_key)
 
     @staticmethod
     def _add_middleware(value: str, middleware: set[str]) -> None:
-        lowered = value.lower()
         for keyword, label in _MIDDLEWARE.items():
-            if keyword in lowered:
+            if keyword in value.lower():
                 middleware.add(label)
+
+    @staticmethod
+    def _matches_middleware(value: str) -> bool:
+        lowered = value.lower()
+        return any(keyword in lowered for keyword in _MIDDLEWARE)

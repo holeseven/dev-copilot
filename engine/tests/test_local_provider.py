@@ -44,6 +44,9 @@ async def test_local_provider_uses_virtual_root_for_multi_repository_reads_and_s
     provider = LocalDevToolProvider("local", _workspace(tmp_path))
 
     assert await provider.call_tool("list_dir", {"path": "."}) == ["api", "web"]
+    api_entries = await provider.call_tool("list_dir", {"path": "api"})
+    assert api_entries == ["api/main.py"]
+    assert await provider.call_tool("read_file", {"path": api_entries[0]}) == "needle = 'api'\n"
     assert await provider.call_tool("read_file", {"path": "api/main.py"}) == "needle = 'api'\n"
     assert await provider.call_tool("find_files", {"glob_pattern": "*.py", "path": "."}) == ["api/main.py"]
     assert await provider.call_tool("grep_code", {"pattern": "needle", "path": "."}) == [
@@ -53,6 +56,20 @@ async def test_local_provider_uses_virtual_root_for_multi_repository_reads_and_s
     search = await provider.call_tool("code_search", {"pattern": "needle", "path": "."})
     assert [item["file"] for item in search["matches"]] == ["api/main.py", "web/index.js"]
     assert str(tmp_path) not in str(search)
+
+
+@pytest.mark.asyncio
+async def test_local_provider_rewrites_missing_paths_without_host_absolute_paths(tmp_path):
+    provider = LocalDevToolProvider("local", _workspace(tmp_path))
+
+    with pytest.raises(FileNotFoundError) as missing_file:
+        await provider.call_tool("read_file", {"path": "api/missing.py"})
+    missing_search = await provider.call_tool("code_search", {"pattern": "needle", "path": "api/missing"})
+
+    assert "api/missing.py" in str(missing_file.value)
+    assert str(tmp_path) not in str(missing_file.value)
+    assert missing_search["error"] == "path does not exist: api/missing"
+    assert str(tmp_path) not in str(missing_search)
 
 
 @pytest.mark.asyncio

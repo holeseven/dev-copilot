@@ -64,3 +64,19 @@ def test_scan_reads_git_branch_and_origin_from_repository_metadata(tmp_path):
 
     assert result.git.branch == "main"
     assert result.git.remote == "git@example.com:team/tracked.git"
+
+
+def test_scan_detects_database_from_application_jdbc_url_and_keeps_url_evidence(tmp_path):
+    repository = tmp_path / "billing"
+    repository.mkdir()
+    (repository / "application.yaml").write_text(
+        "spring:\n  datasource:\n    url: jdbc:postgresql://db:5432/billing\n",
+        encoding="utf-8",
+    )
+
+    result = WorkspaceScanner().scan(Repository(name="billing", path=str(repository)))
+
+    assert result.middleware == ["PostgreSQL"]
+    assert ("application.yaml", "spring.datasource.url") in {
+        (item.source, item.detail) for item in result.evidence
+    }
