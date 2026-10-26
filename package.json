@@ -1,0 +1,13 @@
+{
+  "name": "dev-copilot",
+  "version": "0.1.0",
+  "private": true,
+  "author": "lxy",
+  "engines": {
+    "node": ">=20 <21"
+  },
+  "scripts": {
+    "test:frontend": "node engine/tests/frontend_stream_switch.test.js",
+    "test": "npm run test:frontend"
+  }
+}
