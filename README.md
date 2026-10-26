@@ -1,238 +1,179 @@
 <!-- 作者：lxy -->
 
-# AI 研发助手（Dev Copilot）
+# 小瑶开发助手（Dev Copilot）
 
-> 基于 LangGraph + FastAPI 的研发助手引擎，可在本地 Workspace 中注册多个仓库并进行只读代码问答。
+> 面向本地代码库的开发助手 Alpha：用 Workspace 管理多个仓库，通过 LangGraph 调用只读代码工具，并以 SSE 流式返回结果。
 
----
+## 当前状态
 
-## 当前已验证能力
+项目目前是**本地单用户 Alpha**，不是已经完成的生产级 Agent 平台。当前已经过测试覆盖的主链路包括：
 
-- **本地 Workspace** — 创建、列出、查询、激活和删除本机注册元数据
-- **多仓库注册与扫描** — 识别语言、构建系统、服务、中间件、显式依赖和 Git 信息
-- **Workspace 隔离工具** — 每个 Workspace 独立提供 `list_dir`、`find_files`、`grep_code`、`read_file`、`code_search` 五个只读工具
-- **Graph 工具闭环** — 模型可在一次会话中读取多个已注册仓库，再结合工具结果回答
-- **SSE 流式输出** — 逐 token 推送回答，并报告工具开始、完成或失败状态
-- **薄工作台** — 单页完成 Workspace 切换、仓库注册、扫描与只读聊天
+- 创建、查询、激活和删除 Workspace，并持久化本地注册元数据；
+- 在一个 Workspace 中注册多个仓库，扫描语言、构建系统、服务、中间件、显式依赖和 Git 信息；
+- 按 Workspace 隔离 `list_dir`、`find_files`、`grep_code`、`read_file`、`code_search` 五个只读工具；
+- LangGraph 模型/工具循环和 SSE token、工具状态事件；
+- FastAPI 提供的单文件薄工作台，可切换 Workspace、注册仓库、扫描和发起只读问答；
+- Java 服务提供会话、记忆和配置的数据读写接口，但它目前**不是浏览器统一入口**，前端仍直接连接 Python FastAPI。
 
----
+下列能力仍在开发中，请不要把现有占位模块视为可用功能：
 
-## 架构图
+- 可恢复、可审计的 HITL 受控代码修改闭环；
+- Workspace RAG 索引、增量更新与来源引用；
+- React 产品级工作台以及由 Java 统一代理浏览器 API/SSE；
+- 面向多人或公网部署的认证、授权和租户隔离。
 
-```mermaid
-graph TB
-    Frontend[Workspace 工作台] --> API[FastAPI]
-    API --> Registry[Workspace Registry]
-    API --> Scanner[Workspace Scanner]
-    API --> Graph[共享 LangGraph]
-    Registry --> Manager[按 Workspace 懒建 MCPManager]
-    Manager --> Tools[五个本地只读工具]
-    Tools --> Repositories[已注册本地仓库]
-    Graph --> Manager
-    Graph --> SSE[SSE 消息与工具状态]
-    SSE --> Frontend
+因此，本版本只适合可信机器上的本地开发与评估。不要直接暴露到公网。
+
+## 当前架构
+
+```text
+浏览器薄工作台
+       │ REST / SSE
+       ▼
+Python FastAPI + LangGraph ── Workspace Registry / Scanner
+       │                    └─ 每个 Workspace 独立的只读工具运行时
+       └─ Redis（动态配置与现有基础设施）
+
+Java Spring Boot ── MySQL / Redis
+  └─ 独立的数据服务；尚未接管浏览器入口，也尚未成为 Python 主链路的可靠持久化层
 ```
 
----
+## 安全边界
 
-## 技术栈
+- Python 本地启动默认监听 `127.0.0.1`；Compose 也只把 Engine 和 Java 映射到宿主机 loopback。
+- Redis 与 MySQL 只加入 Compose 内部网络，不发布宿主端口。
+- `DEV_COPILOT_ALLOWED_ROOT` 以只读方式挂载为容器内 `/workspace`；注册表等可写元数据保存在独立 `engine-metadata` volume。
+- 仓库注册路径可以是绝对宿主机/容器路径，但必须位于明确的允许根目录内。注册后，只读工具仅接受仓库内的虚拟相对路径，并拒绝绝对路径、盘符/UNC 路径、`..` 越界、损坏链接，以及通过 symlink/junction（Windows reparse point）逃逸；无法检查或解析时 fail closed。
+- 当前没有用户认证。允许根目录应尽量小，不要挂载整个用户目录、磁盘根目录或敏感凭据目录。
 
-| 层级 | 技术选型 |
-|------|----------|
-| **Python 引擎** | FastAPI 0.115+ · LangGraph 0.2+ · LangChain-OpenAI · Redis (aioredis) · httpx · Pydantic 2 · FAISS · Loguru |
-| **Java 数据服务** | Spring Boot 3.2 · MyBatis-Plus 3.5 · Redis Stream Consumer Group · MySQL 8.0 |
-| **基础设施** | Docker Compose · Redis 7 (AOF) · MySQL 8 · SSE · MCP Protocol |
-| **LLM** | DeepSeek-Chat (L1 路由/轻量) · DeepSeek-Reasoner (L2 复杂推理) · OpenAI 兼容协议 |
+## Docker Compose 快速启动
 
----
-
-## 快速启动
+安全 Compose 是**全容器模式**。先复制环境变量模板，并至少填写下面四项：
 
 ```bash
-# 1. 克隆仓库 & 配置环境变量
-git clone <repo-url> && cd agent
+git clone https://github.com/holeseven/dev-copilot.git
+cd dev-copilot
 cp .env.example .env
-# 编辑 .env，填入 LLM_API_KEY（DeepSeek / OpenAI 兼容 key）
-
-# 2. 一键启动（Redis + MySQL + Python 引擎 + Java 服务）
-docker compose up -d --build
-
-# 3. 访问
-# 前端聊天界面：http://localhost:8000
-# API 文档：    http://localhost:8000/docs
-# Java 数据服务：http://localhost:8081
-# 健康检查：    curl http://localhost:8000/health
 ```
 
-> 本地开发快捷命令：`cd engine && pip install -e . && python -m engine.main`（需本地 Redis）
+```dotenv
+DEV_COPILOT_MYSQL_ROOT_PASSWORD=请生成独立强密码
+DEV_COPILOT_DB_PASSWORD=请生成另一独立强密码
+DEV_COPILOT_ALLOWED_ROOT=/宿主机/允许读取的代码目录
+LLM_API_KEY=你的OpenAI兼容模型Key
+```
 
----
-
-## 本地 Workspace 使用
-
-启动引擎后打开 `http://localhost:8000`：
-
-1. 输入 Workspace ID 和名称，点击“新建并激活”。
-2. 输入仓库名称与本地绝对路径，点击“添加仓库”；可重复添加多个仓库。
-3. 点击“扫描当前 Workspace”，查看每个仓库的语言、构建系统、服务和中间件摘要。
-4. 在聊天区提问，例如“读取 `order-service` 和 `platform` 的配置，总结重试次数”。聊天和工具请求会绑定当前 Workspace，只能读取其中已注册仓库。
-
-同一流程也可通过 API 完成：
+Windows Docker Desktop 可把允许根目录写成例如 `C:/Users/you/code`。确认 Docker Desktop 已授权共享该目录，然后启动：
 
 ```bash
-curl -X POST http://localhost:8000/workspaces \
+docker compose up -d --build
+```
+
+访问地址：
+
+- 小瑶薄工作台：<http://127.0.0.1:8000>
+- Python API 文档：<http://127.0.0.1:8000/docs>
+- Java 数据服务 API 前缀：<http://127.0.0.1:8081/api/v1/agent>
+
+在 Docker 模式注册仓库时必须使用**容器路径**。若宿主目录 `${DEV_COPILOT_ALLOWED_ROOT}` 下有 `order-service`，请求应为：
+
+```bash
+curl -X POST http://127.0.0.1:8000/workspaces \
   -H "Content-Type: application/json" \
   -d '{"id":"local-dev","name":"Local Dev"}'
 
-curl -X POST http://localhost:8000/workspaces/local-dev/repositories \
+curl -X POST http://127.0.0.1:8000/workspaces/local-dev/repositories \
   -H "Content-Type: application/json" \
-  -d '{"name":"order-service","local_path":"/absolute/path/order-service"}'
+  -d '{"name":"order-service","local_path":"/workspace/order-service"}'
 
-curl -X POST http://localhost:8000/workspaces/local-dev/scan
-curl -X POST http://localhost:8000/workspaces/local-dev/activate
+curl -X POST http://127.0.0.1:8000/workspaces/local-dev/scan
+curl -X POST http://127.0.0.1:8000/workspaces/local-dev/activate
 ```
 
-`GET /tools?workspace_id=local-dev` 可查看该 Workspace 的五个只读工具 schema。`POST /chat` 的请求体使用相同的 `workspace_id`，并通过 SSE 返回回答与工具状态。
+Compose 没有发布 Redis/MySQL 端口，所以不要使用 `docker compose up redis mysql` 后再让宿主机进程连接它们。当前本地进程开发需自行提供 `localhost` Redis/MySQL；项目后续会提供单独的开发 override。
 
----
+## Python 本地开发
 
-## 开发者模式（中间件 Docker + 代码本地跑）
-
-### 适用场景
-
-日常开发、调试、频繁改代码时推荐此模式：
-- 代码改完秒生效（`--reload` 热重载）
-- 支持 IDE 断点调试（attach 本地进程）
-- 无需每次重新 build 镜像，迭代效率高
-
-### 前置要求
-
-| 依赖 | 版本 | 说明 |
-|------|------|------|
-| Python | ≥ 3.10（推荐 3.11） | Agent 引擎运行时 |
-| Docker & Compose | 最新稳定版 | 仅用于中间件容器 |
-| Java 17 | 可选 | 仅 Java 数据服务需要 |
-
-### 步骤
-
-#### 1. 只起中间件
+准备 Python 环境和宿主机可访问的 Redis，随后在仓库根目录运行：
 
 ```bash
-docker compose up -d redis mysql
+python -m venv engine/.venv
+# Linux/macOS: source engine/.venv/bin/activate
+# PowerShell:   engine\.venv\Scripts\Activate.ps1
+pip install -e "./engine[dev]"
+
+# Linux/macOS 示例；PowerShell 请使用 $env:变量名="值"
+export LLM_API_KEY="你的Key"
+export REDIS_URL="redis://127.0.0.1:6379/0"
+export WORKSPACE_ALLOWED_ROOTS='["/absolute/path/to/code"]'
+export WORKSPACE_METADATA_DIR="$HOME/.dev-copilot"
+
+uvicorn engine.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-> 仅启动 Redis 和 MySQL 容器，Python/Java 服务在本地运行。
-
-#### 2. Python 引擎本地启动
+本地模式注册仓库时使用真实宿主路径，而不是 `/workspace`：
 
 ```bash
-cd engine
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e .
-cd ..  # 回到 agent/ 根目录
-uvicorn engine.main:app --reload --host 0.0.0.0 --port 8000
+curl -X POST http://127.0.0.1:8000/workspaces/local-dev/repositories \
+  -H "Content-Type: application/json" \
+  -d '{"name":"order-service","local_path":"/absolute/path/to/code/order-service"}'
 ```
 
-- `--reload`：文件变更自动重启，开发必备
-- 确保 `.env` 中 `REDIS_URL` 指向 `redis://localhost:6379/0`
+Windows 请求体可使用 `C:\\Users\\you\\code\\order-service`。所有仓库仍必须落在 `WORKSPACE_ALLOWED_ROOTS` 之内。
 
-#### 3. Java 服务本地启动（可选）
+运行 Python 测试：
 
 ```bash
-cd java-service
-mvn spring-boot:run
+python -m pytest engine/tests -q
 ```
 
-> 仅在需要数据持久化功能时启动，默认端口 8081。
+## 环境变量
 
-#### 4. 访问
+| 变量 | 用途 | 默认值/要求 |
+|---|---|---|
+| `DEV_COPILOT_MYSQL_ROOT_PASSWORD` | Compose 初始化 MySQL root 密码 | Compose 必填 |
+| `DEV_COPILOT_DB_USERNAME` | Java 应用数据库账户 | `dev_copilot` |
+| `DEV_COPILOT_DB_PASSWORD` | Java 应用数据库密码 | Compose 必填 |
+| `DEV_COPILOT_ALLOWED_ROOT` | Compose 允许读取的宿主代码根目录 | Compose 必填、只读挂载 |
+| `LLM_API_KEY` | OpenAI 兼容模型 Key | 实际问答必填 |
+| `LLM_BASE_URL` | OpenAI 兼容接口地址 | `https://api.deepseek.com/v1` |
+| `LLM_MODEL` | 默认/L1 模型 | `deepseek-chat` |
+| `LLM_MODEL_L2` | L2 模型；空值时复用默认模型 | 空 |
+| `REDIS_URL` | Python Redis 地址 | `redis://localhost:6379/0` |
+| `WORKSPACE_ALLOWED_ROOTS` | Python 本地模式允许根目录；JSON 数组或系统路径分隔列表 | 回退到 `WORKSPACE_DIR` |
+| `WORKSPACE_METADATA_DIR` | Workspace 注册元数据目录 | `~/.dev-copilot` |
+| `APP_HOST` | Python 监听地址 | `127.0.0.1` |
+| `APP_PORT` | Python 监听端口 | `8000` |
 
-- 前端聊天界面：http://localhost:8000
-- API 文档：http://localhost:8000/docs
-- 健康检查：`curl http://localhost:8000/health`
-
-### 两种模式对比
-
-| 维度 | 全 Docker（方案 A） | 开发者模式（方案 B） |
-|------|---------------------|----------------------|
-| **启动方式** | `docker compose up -d --build` 一键全起 | 中间件容器 + 本地进程分开启动 |
-| **代码生效** | 需重新 build 镜像（~30s） | 秒级热重载（`--reload`） |
-| **调试支持** | 需额外配置 remote debug | 原生 IDE 断点调试 |
-| **环境一致性** | 接近生产环境，适合联调验收 | 依赖本地 Python/Java 版本 |
-| **资源占用** | 较高（所有服务容器化） | 较低（仅中间件容器化） |
-
-### 切换提示
-
-两种模式可随时切换：
-
-```bash
-# 停掉全部容器（从全 Docker 切到开发者模式）
-docker compose down
-
-# 只保留中间件（开发者模式）
-docker compose up -d redis mysql
-
-# 恢复全 Docker 模式
-docker compose up -d --build
-```
-
----
+完整 Compose 可调项见 [.env.example](.env.example)。
 
 ## 项目结构
 
-```
-agent/
-├── docker-compose.yml           # 多服务编排（Redis/MySQL/Engine/Java）
-├── .env.example                 # 环境变量模板
-├── engine/                      # Python Agent 引擎（核心）
-│   ├── main.py                  # FastAPI 入口 + lifespan 初始化
-│   ├── config/settings.py       # Pydantic Settings 配置管理
-│   ├── infra/                   # 基础设施（redis_client / llm_client / dynamic_config）
-│   ├── core/
-│   │   ├── dispatcher/          # 智能路由（Flash LLM + 超时降级）
-│   │   ├── scheduler/           # CAS 抢占锁 + 任务队列
-│   │   ├── memory/              # ZSET 记忆 + 三层截断格式化
-│   │   ├── mcp/                 # MCP 三层容错 + 混合工具源
-│   │   ├── orchestrator/        # Supervisor + Planner + SubAgentTool
-│   │   ├── openspec/            # OpenSpec 模块
-│   │   ├── hitl/                # 审批模块
-│   │   ├── rag/                 # 检索模块
-│   │   └── streaming/           # SSE 流式引擎
-│   ├── orchestrator/            # LangGraph 编排（graph_builder / nodes）
-│   ├── api/                     # REST 路由（chat / tasks / tools）
-│   └── tests/                   # 单元测试
-└── java-service/                # Java 持久化服务（Spring Boot + MyBatis-Plus）
+```text
+dev-copilot/
+├── docker-compose.yml        # 本地全容器编排与安全网络边界
+├── .env.example              # 无凭据的环境变量模板
+├── engine/                   # Python FastAPI / LangGraph Agent 引擎
+│   ├── api/                  # chat、tasks、tools、workspaces 路由
+│   ├── core/workspace/       # Registry、PathGuard、Scanner
+│   ├── core/mcp/             # Workspace 隔离的只读工具运行时
+│   ├── orchestrator/         # 当前接入主链路的 LangGraph 图和节点
+│   ├── frontend/index.html   # 当前单文件薄工作台
+│   └── tests/
+└── java-service/             # Spring Boot 会话/记忆/配置数据服务
 ```
 
----
+`engine/core/hitl`、`engine/core/rag`、`engine/core/openspec`、`engine/core/orchestrator` 和部分 `agents` 文件是实验或演进中的模块，目前未形成完整产品主链路。
 
-## 环境变量说明
+## API 使用提示
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `LLM_API_KEY` | LLM 服务 API Key（必填） | — |
-| `LLM_BASE_URL` | OpenAI 兼容 API 地址 | `https://api.deepseek.com/v1` |
-| `LLM_MODEL` | L1 轻量模型 | `deepseek-chat` |
-| `LLM_MODEL_L2` | L2 复杂推理模型（留空复用 L1） | — |
-| `REDIS_URL` | Redis 连接地址 | `redis://localhost:6379/0` |
-| `WORKSPACE_DIR` | Agent 文件操作沙箱目录 | `./workspace` |
-| `CONFIG_REFRESH_INTERVAL` | 动态配置轮询间隔(秒) | `30` |
-
----
-
-## 核心设计理念
-
-1. **Workspace 隔离** — 本地工具固定绑定一个 Workspace，只解析其中已注册仓库的虚拟路径
-2. **只读优先** — 当前工具 schema 仅包含目录浏览、文件查找、代码搜索和文件读取
-3. **请求级依赖** — Chat 与 Tools 按请求解析显式或 active Workspace，并向共享 Graph 传入对应 manager
-4. **确定性扫描** — 扫描结果来自支持的项目清单和 Git 元数据，按稳定顺序返回
-
----
+- `GET /tools?workspace_id=local-dev` 返回当前 Workspace 的只读工具 schema。
+- `POST /chat` 需要 `message`、`session_id` 和 `workspace_id`，通过 SSE 返回消息与工具状态。
+- 未显式传 `workspace_id` 时会使用 active Workspace；没有 active Workspace 会返回冲突错误。
+- `POST /chat/resume` 已有接口骨架，但当前图没有持久化 checkpointer，不能视为可靠的跨请求 HITL 恢复能力。
 
 ## License
 
 MIT
 
----
-
-> 作者：lxy ｜ 技术栈：Python + Java 双栈 ｜ 编排引擎：LangGraph
+作者：lxy

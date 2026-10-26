@@ -72,9 +72,22 @@ class DynamicConfig:
 
     async def stop_refresh(self) -> None:
         """停止后台刷新任务"""
-        if self._refresh_task is not None:
-            self._refresh_task.cancel()
-            self._refresh_task = None
+        task = self._refresh_task
+        if task is None:
+            return
+
+        task.cancel()
+        try:
+            results = await asyncio.gather(task, return_exceptions=True)
+        finally:
+            if self._refresh_task is task:
+                self._refresh_task = None
+
+        result = results[0]
+        if isinstance(result, asyncio.CancelledError):
+            return
+        if isinstance(result, BaseException):
+            raise result
 
     @staticmethod
     def _serialize(value: Any) -> str:

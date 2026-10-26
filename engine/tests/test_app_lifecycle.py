@@ -1,3 +1,4 @@
+# @author lxy
 import asyncio
 from types import SimpleNamespace
 
@@ -33,6 +34,51 @@ class ClosingManager:
 
     async def shutdown(self):
         self.closed = True
+
+
+class FailingManager:
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def shutdown(self):
+        self.calls.append("failing-manager")
+        raise RuntimeError("manager cleanup failed")
+
+
+class RecordingManager:
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def shutdown(self):
+        self.calls.append("recording-manager")
+
+
+def configure_lifespan_dependencies(tmp_path, monkeypatch, dynamic_config, calls):
+    settings = SimpleNamespace(
+        app_name="test-engine",
+        log_level="INFO",
+        workspace_metadata_path=tmp_path / "metadata",
+        workspace_allowed_root_paths=(),
+    )
+
+    async def init_redis():
+        calls.append("init-redis")
+
+    async def close_redis():
+        calls.append("close-redis")
+
+    monkeypatch.setattr(main, "init_redis", init_redis)
+    monkeypatch.setattr(main, "close_redis", close_redis)
+    monkeypatch.setattr(main, "get_llm_by_complexity", lambda _: object())
+    monkeypatch.setattr(main, "get_dynamic_config", lambda: dynamic_config)
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        main,
+        "WorkspaceRegistry",
+        lambda **kwargs: WorkspaceRegistry(tmp_path / "metadata"),
+    )
+    monkeypatch.setattr(main, "build_agent_graph", object)
+    monkeypatch.setattr(main, "get_agent_dispatcher", object)
 
 
 @pytest.mark.asyncio
@@ -153,6 +199,89 @@ async def test_lifespan_closes_manager_initialized_during_teardown(tmp_path, mon
 
     assert manager.closed is True
     assert app.state.mcp_managers == {}
+
+
+@pytest.mark.asyncio
+async def test_lifespan_attempts_every_cleanup_and_reraises_first_error(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    class RecordingDynamicConfig(FakeDynamicConfig):
+        async def stop_refresh(self):
+            calls.append("stop-refresh")
+            self.stopped = True
+
+    dynamic_config = RecordingDynamicConfig()
+    configure_lifespan_dependencies(tmp_path, monkeypatch, dynamic_config, calls)
+    app = FastAPI()
+    context = main.lifespan(app)
+    await context.__aenter__()
+    app.state.mcp_managers.update(
+        {
+            "fails": FailingManager(calls),
+            "closes": RecordingManager(calls),
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="manager cleanup failed"):
+        await context.__aexit__(None, None, None)
+
+    assert calls == [
+        "init-redis",
+        "failing-manager",
+        "recording-manager",
+        "stop-refresh",
+        "close-redis",
+    ]
+    assert app.state.mcp_managers == {}
+    assert dynamic_config.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_lifespan_closes_redis_when_dynamic_config_cleanup_fails(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    class FailingDynamicConfig(FakeDynamicConfig):
+        async def stop_refresh(self):
+            calls.append("stop-refresh")
+            raise ValueError("dynamic config cleanup failed")
+
+    dynamic_config = FailingDynamicConfig()
+    configure_lifespan_dependencies(tmp_path, monkeypatch, dynamic_config, calls)
+    app = FastAPI()
+    context = main.lifespan(app)
+    await context.__aenter__()
+
+    with pytest.raises(ValueError, match="dynamic config cleanup failed"):
+        await context.__aexit__(None, None, None)
+
+    assert calls == ["init-redis", "stop-refresh", "close-redis"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_preserves_body_error_when_cleanup_also_fails(
+    tmp_path, monkeypatch
+):
+    calls = []
+    body_error = ValueError("request handling failed")
+    dynamic_config = FakeDynamicConfig()
+    configure_lifespan_dependencies(tmp_path, monkeypatch, dynamic_config, calls)
+    app = FastAPI()
+
+    with pytest.raises(ValueError, match="request handling failed") as raised:
+        async with main.lifespan(app):
+            app.state.mcp_managers["fails"] = FailingManager(calls)
+            raise body_error
+
+    assert raised.value is body_error
+    assert any(
+        "manager cleanup failed" in note
+        for note in getattr(raised.value, "__notes__", [])
+    )
+    assert calls == ["init-redis", "failing-manager", "close-redis"]
 
 
 def test_application_mounts_workspace_routes():

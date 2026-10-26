@@ -68,19 +68,61 @@ async def lifespan(app: FastAPI):
     app.state.workspace_manager_lock = asyncio.Lock()
 
     logger.info("{} 启动完成", settings.app_name)
+    body_error: Exception | None = None
     try:
         yield
+    except Exception as exc:
+        body_error = exc
     finally:
         # 关闭阶段：逆序释放资源
         logger.info("正在关闭 {} ...", settings.app_name)
         async with app.state.workspace_manager_lock:
-            managers = list(app.state.mcp_managers.values())
+            managers = list(app.state.mcp_managers.items())
             app.state.mcp_managers.clear()
-        for manager in managers:
-            await manager.shutdown()
-        await dynamic_config.stop_refresh()
-        await close_redis()
-        logger.info("{} 已关闭", settings.app_name)
+        cleanup_errors: list[Exception] = []
+        for workspace_id, manager in managers:
+            try:
+                await manager.shutdown()
+            except Exception as exc:
+                logger.exception(
+                    "Workspace {} runtime cleanup failed", workspace_id
+                )
+                cleanup_errors.append(exc)
+        try:
+            await dynamic_config.stop_refresh()
+        except Exception as exc:
+            logger.exception("Dynamic configuration cleanup failed")
+            cleanup_errors.append(exc)
+        try:
+            await close_redis()
+        except Exception as exc:
+            logger.exception("Redis cleanup failed")
+            cleanup_errors.append(exc)
+        if not cleanup_errors:
+            logger.info("{} 已关闭", settings.app_name)
+
+    primary_error = (
+        body_error
+        if body_error is not None
+        else (cleanup_errors[0] if cleanup_errors else None)
+    )
+    if primary_error is not None:
+        additional_errors = (
+            cleanup_errors if body_error is not None else cleanup_errors[1:]
+        )
+        notes = [
+            f"Additional cleanup failure: {error!r}"
+            for error in additional_errors
+        ]
+        if hasattr(primary_error, "add_note"):
+            for note in notes:
+                primary_error.add_note(note)
+        elif notes:
+            primary_error.__notes__ = [
+                *getattr(primary_error, "__notes__", []),
+                *notes,
+            ]
+        raise primary_error
 
 
 def create_app() -> FastAPI:
