@@ -23,14 +23,24 @@ def _resolve_workspace(workspace_dir: Optional[str] = None) -> str:
     return str(Path(workspace_dir).expanduser().resolve())
 
 
-def _safe_resolve(path: str, workspace_dir: Optional[str] = None) -> str:
+def _safe_resolve(
+    path: str,
+    workspace_dir: Optional[str] = None,
+) -> str:
     """
     将用户传入路径解析为绝对路径，并校验是否在 workspace_dir 内。
     越界则抛出 PermissionError。
     """
     workspace = Path(_resolve_workspace(workspace_dir))
     candidate = Path(path).expanduser()
-    resolved = (workspace / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    if candidate == Path("."):
+        resolved = workspace
+    else:
+        resolved = (
+            (workspace / candidate).resolve()
+            if not candidate.is_absolute()
+            else candidate.resolve()
+        )
     try:
         resolved.relative_to(workspace)
     except ValueError:
@@ -42,7 +52,10 @@ def _safe_resolve(path: str, workspace_dir: Optional[str] = None) -> str:
 
 # ──────────────────────────── 工具函数 ────────────────────────────
 
-def list_dir(path: str = ".", workspace_dir: Optional[str] = None) -> List[str]:
+def list_dir(
+    path: str = ".",
+    workspace_dir: Optional[str] = None,
+) -> List[str]:
     """
     列出目录内容，返回条目名列表。
 
@@ -192,7 +205,11 @@ def grep_code(
     return results
 
 
-def find_files(glob_pattern: str, path: str = ".", workspace_dir: Optional[str] = None) -> List[str]:
+def find_files(
+    glob_pattern: str,
+    path: str = ".",
+    workspace_dir: Optional[str] = None,
+) -> List[str]:
     """
     按 glob 模式搜索文件名。
 

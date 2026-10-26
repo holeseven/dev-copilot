@@ -41,6 +41,16 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
     redis_calls = []
     graph = object()
     dispatcher = object()
+    metadata_root = tmp_path / "metadata"
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
+    settings = SimpleNamespace(
+        app_name="test-engine",
+        log_level="INFO",
+        workspace_metadata_path=metadata_root,
+        workspace_allowed_root_paths=(allowed_root.resolve(),),
+    )
+    registry_arguments = []
 
     async def init_redis():
         redis_calls.append("init")
@@ -52,7 +62,12 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
     monkeypatch.setattr(main, "close_redis", close_redis)
     monkeypatch.setattr(main, "get_llm_by_complexity", lambda _: object())
     monkeypatch.setattr(main, "get_dynamic_config", lambda: dynamic_config)
-    monkeypatch.setattr(main, "WorkspaceRegistry", lambda: WorkspaceRegistry(tmp_path / "metadata"))
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(
+        main,
+        "WorkspaceRegistry",
+        lambda **kwargs: registry_arguments.append(kwargs) or WorkspaceRegistry(**kwargs),
+    )
     monkeypatch.setattr(main, "build_agent_graph", lambda: graph)
     monkeypatch.setattr(main, "get_agent_dispatcher", lambda: dispatcher)
     app = FastAPI()
@@ -61,6 +76,10 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
     async with main.lifespan(app):
         assert app.state.workspace_registry.list() == []
         assert app.state.workspace_scanner is not None
+        assert (
+            app.state.workspace_scanner.path_guard
+            is app.state.workspace_registry.path_guard
+        )
         assert app.state.agent_graph is graph
         assert app.state.dispatcher is dispatcher
         assert app.state.mcp_managers == {}
@@ -72,6 +91,12 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
     assert dynamic_config.started is True
     assert dynamic_config.stopped is True
     assert redis_calls == ["init", "close"]
+    assert registry_arguments == [
+        {
+            "root": metadata_root,
+            "allowed_roots": (allowed_root.resolve(),),
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -102,7 +127,11 @@ async def test_lifespan_closes_manager_initialized_during_teardown(tmp_path, mon
     monkeypatch.setattr(main, "close_redis", noop)
     monkeypatch.setattr(main, "get_llm_by_complexity", lambda _: object())
     monkeypatch.setattr(main, "get_dynamic_config", lambda: dynamic_config)
-    monkeypatch.setattr(main, "WorkspaceRegistry", lambda: WorkspaceRegistry(tmp_path / "metadata"))
+    monkeypatch.setattr(
+        main,
+        "WorkspaceRegistry",
+        lambda **kwargs: WorkspaceRegistry(tmp_path / "metadata"),
+    )
     monkeypatch.setattr(main, "build_agent_graph", object)
     monkeypatch.setattr(main, "get_agent_dispatcher", object)
     monkeypatch.setattr(workspaces, "MCPManager", BlockingManager)

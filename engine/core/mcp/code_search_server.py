@@ -1,81 +1,39 @@
 # @author lxy
-"""
-CodeSearchServer —— 最简 MCP Server 示例
-
-展示 MCP 协议的 Server 端实现：
-- tools_list(): 返回工具 schema（code_search）。
-- tools_call(name, args): 执行代码检索（优先使用 ripgrep，降级为 Python 遍历 grep）。
-
-该模块可独立运行，也可嵌入其他 Server 框架。
-"""
 import asyncio
-import logging
-import os
+import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
-
-# ──────────────────────────── 配置常量 ────────────────────────────
-
-MAX_RESULTS = 50  # 最大返回匹配数
-MAX_FILE_SIZE = 1_000_000  # 单文件最大读取字节数（1MB）
-DEFAULT_WORKSPACE = os.environ.get("WORKSPACE_DIR", os.getcwd())
+from engine.core.workspace.path_guard import (
+    GuardedRepository,
+    WorkspacePathError,
+)
 
 
+MAX_RESULTS = 50
+MAX_FILE_SIZE = 1_000_000
 class CodeSearchServer:
-    """
-    最简 MCP Server —— 代码检索。
+    """Code search constrained by a guarded repository capability."""
 
-    实现 MCP 协议要求的两个核心方法：
-    - tools_list(): 声明可提供的工具列表及其 JSON Schema。
-    - tools_call(name, args): 根据工具名分发执行。
-
-    Usage:
-        server = CodeSearchServer(workspace_dir="/path/to/project")
-        schemas = server.tools_list()
-        result = await server.tools_call("code_search", {"pattern": "def main"})
-    """
-
-    def __init__(self, workspace_dir: Optional[str] = None):
-        """
-        Args:
-            workspace_dir: 代码检索的根目录。
-        """
-        self.workspace_dir = workspace_dir or DEFAULT_WORKSPACE
-
-    # ═══════════════════ MCP 协议接口 ═══════════════════
+    def __init__(
+        self,
+        repository: GuardedRepository,
+    ):
+        self.repository = repository
 
     def tools_list(self) -> List[Dict[str, Any]]:
-        """
-        返回该 Server 提供的工具列表（MCP tools/list 协议）。
-
-        Returns:
-            工具 schema 列表。
-        """
         return [
             {
                 "name": "code_search",
-                "description": "在工作区内搜索代码，支持正则表达式。优先使用 ripgrep 加速检索。",
+                "description": "Search source code with a regular expression.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": {
-                            "type": "string",
-                            "description": "搜索模式（正则表达式）",
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "限定搜索子目录（相对于 workspace，可选）",
-                        },
-                        "file_glob": {
-                            "type": "string",
-                            "description": "文件名 glob 过滤（如 *.py），可选",
-                        },
-                        "max_results": {
-                            "type": "integer",
-                            "description": f"最大返回结果数（默认 {MAX_RESULTS}）",
-                        },
+                        "pattern": {"type": "string"},
+                        "path": {"type": "string"},
+                        "file_glob": {"type": "string"},
+                        "max_results": {"type": "integer"},
                     },
                     "required": ["pattern"],
                 },
@@ -83,172 +41,149 @@ class CodeSearchServer:
         ]
 
     async def tools_call(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        执行工具调用（MCP tools/call 协议）。
-
-        Args:
-            name: 工具名称。
-            args: 工具参数。
-        Returns:
-            执行结果字典。
-        Raises:
-            ValueError: 工具名称不支持。
-        """
-        if name == "code_search":
-            return await self._code_search(args)
-        else:
-            raise ValueError(f"未知工具: {name}")
-
-    # ═══════════════════ 内部实现 ═══════════════════
+        if name != "code_search":
+            raise ValueError(f"unknown tool: {name}")
+        return await self._code_search(args)
 
     async def _code_search(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        代码检索核心逻辑。
-
-        策略：优先调用 ripgrep（rg），若不可用则降级为 Python 文件遍历。
-        """
         pattern = args.get("pattern", "")
-        sub_path = args.get("path", "")
+        sub_path = args.get("path", ".") or "."
         file_glob = args.get("file_glob", "")
         max_results = min(args.get("max_results", MAX_RESULTS), MAX_RESULTS)
-
         if not pattern:
-            return {"error": "pattern 参数不能为空", "matches": []}
-
-        # 构建搜索路径
-        ws_resolved = Path(self.workspace_dir).resolve()
-        search_dir = ws_resolved
-        if sub_path:
-            search_dir = search_dir / sub_path
-        search_dir = search_dir.resolve()
+            return {"error": "pattern must not be empty", "matches": []}
 
         try:
-            search_dir.relative_to(ws_resolved)
-        except ValueError:
-            return {"error": "搜索路径越界", "matches": []}
+            search_dir = self.repository.resolve(
+                sub_path, kind="dir", must_exist=True
+            )
+        except WorkspacePathError as exc:
+            if "does not exist" in str(exc):
+                return {"error": f"path does not exist: {sub_path}", "matches": []}
+            raise
+        search_relative = self.repository.relative_path(search_dir, resolve=False)
+        guarded_files = self.repository.iter_files(search_relative)
 
-        if not search_dir.exists():
-            return {"error": f"路径不存在: {search_dir}", "matches": []}
-
-        # 尝试 ripgrep
         rg_result = await self._search_with_ripgrep(
             pattern, str(search_dir), file_glob, max_results
         )
         if rg_result is not None:
-            return self._relative_result_paths(rg_result, ws_resolved)
-
-        # 降级：Python 遍历
-        result = await self._search_with_python(
-            pattern, search_dir, file_glob, max_results
+            return self._guard_result_paths(rg_result)
+        return await self._search_with_python(
+            pattern, guarded_files, file_glob, max_results
         )
-        return self._relative_result_paths(result, ws_resolved)
 
-    @staticmethod
-    def _relative_result_paths(result: Dict[str, Any], workspace: Path) -> Dict[str, Any]:
+    def _guard_result_paths(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        validated_matches = []
         for match in result.get("matches", []):
-            try:
-                match["file"] = str(Path(match["file"]).resolve().relative_to(workspace))
-            except ValueError:
-                match["file"] = Path(match["file"]).name
-        return result
+            raw_path = Path(match["file"])
+            if raw_path.is_absolute() or raw_path.drive:
+                relative = self.repository.relative_path(raw_path)
+            else:
+                path = self.repository.resolve(raw_path, kind="file", must_exist=True)
+                relative = self.repository.relative_path(path, resolve=False)
+            validated_matches.append({**match, "file": relative})
+        return {**result, "matches": validated_matches}
 
     async def _search_with_ripgrep(
-        self, pattern: str, search_dir: str, file_glob: str, max_results: int
+        self,
+        pattern: str,
+        search_dir: str,
+        file_glob: str,
+        max_results: int,
     ) -> Optional[Dict[str, Any]]:
-        """
-        使用 ripgrep 搜索代码。
-
-        Returns:
-            搜索结果字典，若 rg 不可用则返回 None。
-        """
-        cmd = ["rg", "--json", "-m", str(max_results), pattern, search_dir]
+        command = [
+            "rg",
+            "--json",
+            "--no-follow",
+            "-m",
+            str(max_results),
+            pattern,
+            search_dir,
+        ]
         if file_glob:
-            cmd.extend(["--glob", file_glob])
-
+            command.extend(["--glob", file_glob])
         try:
             process = await asyncio.create_subprocess_exec(
-                *cmd,
+                *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout_bytes, _ = await asyncio.wait_for(
-                process.communicate(), timeout=30
-            )
-
-            if process.returncode not in (0, 1):
-                # rg 返回 1 表示无匹配，非错误
-                return None
-
-            import json
-            matches = []
-            for line in stdout_bytes.decode("utf-8", errors="replace").split("\n"):
-                if not line.strip():
-                    continue
-                try:
-                    entry = json.loads(line)
-                    if entry.get("type") == "match":
-                        data = entry["data"]
-                        matches.append({
-                            "file": data["path"]["text"],
-                            "line_number": data["line_number"],
-                            "content": data["lines"]["text"].rstrip("\n"),
-                        })
-                except (json.JSONDecodeError, KeyError):
-                    continue
-
-            return {
-                "matches": matches[:max_results],
-                "total": len(matches),
-                "engine": "ripgrep",
-                "pattern": pattern,
-            }
-
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
         except (FileNotFoundError, asyncio.TimeoutError):
-            # rg 未安装或超时，降级
+            return None
+        if process.returncode not in (0, 1):
             return None
 
-    async def _search_with_python(
-        self, pattern: str, search_dir: Path, file_glob: str, max_results: int
-    ) -> Dict[str, Any]:
-        """
-        降级方案：使用 Python 遍历文件并 grep。
-        """
-        import re
+        matches = []
+        for line in stdout.decode("utf-8", errors="replace").splitlines():
+            try:
+                entry = json.loads(line)
+                if entry.get("type") != "match":
+                    continue
+                data = entry["data"]
+                matches.append(
+                    {
+                        "file": data["path"]["text"],
+                        "line_number": data["line_number"],
+                        "content": data["lines"]["text"].rstrip("\n"),
+                    }
+                )
+            except (json.JSONDecodeError, KeyError):
+                continue
+        return {
+            "matches": matches[:max_results],
+            "total": min(len(matches), max_results),
+            "engine": "ripgrep",
+            "pattern": pattern,
+        }
 
+    async def _search_with_python(
+        self,
+        pattern: str,
+        guarded_files: Tuple[Path, ...],
+        file_glob: str,
+        max_results: int,
+    ) -> Dict[str, Any]:
         try:
             regex = re.compile(pattern)
-        except re.error as e:
-            return {"error": f"正则表达式无效: {e}", "matches": []}
+        except re.error as exc:
+            return {"error": f"invalid pattern: {exc}", "matches": []}
 
         matches = []
         glob_pattern = file_glob or "*"
-
-        for filepath in search_dir.rglob(glob_pattern):
+        for file_path in guarded_files:
+            relative = self.repository.relative_path(file_path, resolve=False)
+            parts = Path(relative).parts
+            if not Path(relative).match(glob_pattern):
+                continue
+            if any(
+                part.startswith(".")
+                or part in ("node_modules", "__pycache__", "venv")
+                for part in parts
+            ):
+                continue
+            try:
+                if file_path.stat().st_size > MAX_FILE_SIZE:
+                    continue
+            except OSError as exc:
+                raise WorkspacePathError(
+                    f"cannot inspect search file: {relative}"
+                ) from exc
+            content = self.repository.read_text(relative, errors="ignore")
+            for line_number, line in enumerate(content.splitlines(), 1):
+                if regex.search(line):
+                    matches.append(
+                        {
+                            "file": relative,
+                            "line_number": line_number,
+                            "content": line,
+                        }
+                    )
+                    if len(matches) >= max_results:
+                        break
             if len(matches) >= max_results:
                 break
-            if not filepath.is_file():
-                continue
-            if filepath.stat().st_size > MAX_FILE_SIZE:
-                continue
-            # 跳过隐藏目录和常见忽略目录
-            parts = filepath.parts
-            if any(p.startswith(".") or p in ("node_modules", "__pycache__", "venv") for p in parts):
-                continue
-
-            try:
-                content = filepath.read_text(encoding="utf-8", errors="ignore")
-                for line_num, line in enumerate(content.split("\n"), 1):
-                    if regex.search(line):
-                        matches.append({
-                            "file": str(filepath),
-                            "line_number": line_num,
-                            "content": line.rstrip(),
-                        })
-                        if len(matches) >= max_results:
-                            break
-            except (OSError, UnicodeDecodeError):
-                continue
-
         return {
             "matches": matches,
             "total": len(matches),

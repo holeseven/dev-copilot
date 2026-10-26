@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessageChunk
 
 from engine.api import chat, tools, workspaces
 from engine.core.workspace.models import Workspace
+from engine.core.workspace.path_guard import WorkspacePathGuard
 from engine.core.streaming.sse_engine import sse_event_generator
 from engine.core.workspace.registry import WorkspaceRegistry
 
@@ -67,7 +68,11 @@ async def test_concurrent_manager_creation_reuses_one_initialized_instance(monke
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
-                mcp_managers={}, workspace_manager_lock=asyncio.Lock()
+                mcp_managers={},
+                workspace_manager_lock=asyncio.Lock(),
+                    workspace_registry=SimpleNamespace(
+                        path_guard=WorkspacePathGuard.from_roots(())
+                    ),
             )
         )
     )

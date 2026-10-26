@@ -45,7 +45,11 @@ async def get_workspace_manager(request: Request, workspace: Workspace) -> MCPMa
         manager = managers.get(workspace.id)
         if manager is not None:
             return manager
-        provider = LocalDevToolProvider("local", workspace)
+        provider = LocalDevToolProvider(
+            "local",
+            workspace,
+            path_guard=request.app.state.workspace_registry.path_guard,
+        )
         manager = MCPManager(
             [{"name": "local", "type": "local", "provider": provider}]
         )
@@ -121,12 +125,16 @@ async def add_repository(
 async def scan_workspace(
     workspace_id: str, request: Request
 ) -> List[RepositoryScan]:
-    workspace = request.app.state.workspace_registry.get(workspace_id)
+    registry = request.app.state.workspace_registry
+    workspace = registry.get(workspace_id)
     if workspace is None:
         raise HTTPException(status_code=404, detail=f"workspace not found: {workspace_id}")
     scanner = request.app.state.workspace_scanner
     try:
-        return [scanner.scan(repository) for repository in workspace.repositories]
+        return [
+            scanner.scan(repository)
+            for repository in workspace.repositories
+        ]
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
 

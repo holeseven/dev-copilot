@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from engine.core.mcp.local_provider import LocalDevToolProvider
 from engine.core.mcp.manager import MCPManager
 from engine.core.workspace.models import Repository, Workspace
+from engine.core.workspace.path_guard import WorkspacePathGuard
 from engine.orchestrator.graph_builder import build_agent_graph
 from engine.orchestrator.nodes import agent_node, tool_node
 
@@ -95,7 +96,11 @@ async def test_graph_runs_real_read_file_loop_across_two_repositories(tmp_path, 
             {
                 "name": "local",
                 "type": "local",
-                "provider": LocalDevToolProvider("local", workspace),
+                "provider": LocalDevToolProvider(
+                    "local",
+                    workspace,
+                    path_guard=WorkspacePathGuard.from_roots((tmp_path,)),
+                ),
             }
         ]
     )
@@ -154,7 +159,11 @@ async def test_workspace_bound_manager_cannot_read_another_workspace_path(tmp_pa
             {
                 "name": "local",
                 "type": "local",
-                "provider": LocalDevToolProvider("local", second),
+                "provider": LocalDevToolProvider(
+                    "local",
+                    second,
+                    path_guard=WorkspacePathGuard.from_roots((second_root,)),
+                ),
             }
         ]
     )

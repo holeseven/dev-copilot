@@ -1,18 +1,29 @@
+import fnmatch
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from engine.core.mcp.providers import ToolProvider
+from engine.core.workspace.path_guard import (
+    GuardedRepository,
+    OutsideWorkspaceError,
+    WorkspacePathError,
+    WorkspacePathGuard,
+)
 
 
 class LocalDevToolProvider(ToolProvider):
-    """Read-only developer tools bound to one workspace's repositories."""
+    """Read-only developer tools backed by guarded repository capabilities."""
 
     retry_on_error = False
 
-    def __init__(self, name: str, workspace):
+    def __init__(self, name: str, workspace, path_guard: WorkspacePathGuard):
         super().__init__(name)
         self.workspace = workspace
-        self._repositories = {repository.name: repository for repository in workspace.repositories}
+        self.path_guard = path_guard
+        self._repositories = {
+            repository.name: repository for repository in workspace.repositories
+        }
 
     async def list_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -42,72 +53,112 @@ class LocalDevToolProvider(ToolProvider):
 
     def _list_dir(self, path: str) -> List[str]:
         if path == ".":
-            return sorted(self._repositories)
-        repository, relative = self._repository_for_path(path)
-        from engine.core.mcp.dev_tools.file_tools import list_dir
+            return [name for name, _ in self._bind_all()]
+        guarded, relative = self._repository_for_path(path)
         try:
             return [
-                self._virtual_entry(repository.name, relative, entry)
-                for entry in list_dir(relative, workspace_dir=repository.path)
+                self._virtual_entry(guarded.name, relative, entry)
+                for entry in guarded.list_dir(relative)
             ]
-        except FileNotFoundError:
-            raise FileNotFoundError(f"directory not found: {path}") from None
+        except WorkspacePathError as exc:
+            if "does not exist" in str(exc):
+                raise FileNotFoundError(f"directory not found: {path}") from None
+            raise
 
     def _find_files(self, glob_pattern: str, path: str) -> List[str]:
-        from engine.core.mcp.dev_tools.file_tools import find_files
-        return self._across_repositories(path, lambda repository, relative: [self._virtual_path(repository.name, result) for result in find_files(glob_pattern, relative, workspace_dir=repository.path)])
+        return self._across_repositories(
+            path,
+            lambda guarded, relative: [
+                self._virtual_path(guarded.name, guarded.relative_path(file_path))
+                for file_path in guarded.iter_files(relative)
+                if fnmatch.fnmatch(file_path.name, glob_pattern)
+            ],
+        )[:100]
 
     def _grep_code(self, pattern: str, path: str, ignore_case: bool) -> List[str]:
-        from engine.core.mcp.dev_tools.file_tools import grep_code
-        return self._across_repositories(path, lambda repository, relative: [self._virtual_path(repository.name, result) for result in grep_code(pattern, relative, ignore_case, workspace_dir=repository.path)])
+        regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+
+        def search(guarded: GuardedRepository, relative: str) -> List[str]:
+            matches = []
+            for file_path in guarded.iter_files(relative):
+                file_relative = guarded.relative_path(file_path)
+                for line_number, line in enumerate(
+                    guarded.read_text(file_relative).splitlines(), 1
+                ):
+                    if regex.search(line):
+                        matches.append(
+                            f"{self._virtual_path(guarded.name, file_relative)}:"
+                            f"{line_number}:{line}"
+                        )
+            return matches
+
+        return self._across_repositories(path, search)[:200]
 
     def _read_file(self, path: str, start_line: Optional[int], end_line: Optional[int]) -> str:
-        repository, relative = self._repository_for_path(path)
-        from engine.core.mcp.dev_tools.file_tools import read_file
+        guarded, relative = self._repository_for_path(path)
         try:
-            return read_file(relative, start_line, end_line, workspace_dir=repository.path)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"file not found: {path}") from None
+            lines = guarded.read_text(relative).splitlines(keepends=True)
+        except WorkspacePathError as exc:
+            if "does not exist" in str(exc):
+                raise FileNotFoundError(f"file not found: {path}") from None
+            raise
+        if start_line is not None or end_line is not None:
+            start = (start_line - 1) if start_line else 0
+            end = end_line if end_line else len(lines)
+            lines = lines[start:end]
+        return "".join(lines)
 
     async def _code_search(self, pattern: str, path: str, file_glob: str, max_results: int) -> Dict[str, Any]:
         from engine.core.mcp.code_search_server import CodeSearchServer
+
         matches = []
-        for repository, relative in self._paths_for(path):
-            result = await CodeSearchServer(workspace_dir=repository.path).tools_call("code_search", {"pattern": pattern, "path": relative, "file_glob": file_glob, "max_results": max_results})
+        for guarded, relative in self._paths_for(path):
+            result = await CodeSearchServer(guarded).tools_call(
+                "code_search",
+                {"pattern": pattern, "path": relative, "file_glob": file_glob, "max_results": max_results},
+            )
             if result.get("error"):
-                if "路径不存在" in result["error"]:
-                    return {"error": f"path does not exist: {self._virtual_path(repository.name, relative)}", "matches": []}
+                if "does not exist" in result["error"]:
+                    return {"error": f"path does not exist: {self._virtual_path(guarded.name, relative)}", "matches": []}
                 return result
-            matches.extend({**match, "file": self._virtual_path(repository.name, match["file"])} for match in result["matches"])
+            matches.extend(
+                {**match, "file": self._virtual_path(guarded.name, match["file"])}
+                for match in result["matches"]
+            )
         matches.sort(key=lambda match: (match["file"], match["line_number"], match["content"]))
         return {"matches": matches[:max_results], "total": min(len(matches), max_results), "engine": "local", "pattern": pattern}
 
     def _across_repositories(self, path: str, operation) -> List[str]:
         results = []
-        for repository, relative in self._paths_for(path):
-            results.extend(operation(repository, relative))
+        for guarded, relative in self._paths_for(path):
+            results.extend(operation(guarded, relative))
         return sorted(results)
 
-    def _paths_for(self, path: str) -> List[Tuple[Any, str]]:
+    def _paths_for(self, path: str) -> List[Tuple[GuardedRepository, str]]:
         if path == ".":
-            return [(repository, ".") for _, repository in sorted(self._repositories.items())]
+            return [(guarded, ".") for _, guarded in self._bind_all()]
         return [self._repository_for_path(path)]
 
-    def _repository_for_path(self, path: str) -> Tuple[Any, str]:
+    def _repository_for_path(self, path: str) -> Tuple[GuardedRepository, str]:
         candidate = Path(path)
         if candidate.is_absolute() or not candidate.parts:
             raise PermissionError(f"path is outside the virtual workspace: {path}")
         repository = self._repositories.get(candidate.parts[0])
         if repository is None:
             raise PermissionError(f"path is outside the virtual workspace: {path}")
-        root = Path(repository.path).resolve()
+        guarded = self.path_guard.bind(repository)
         relative = Path(*candidate.parts[1:]) if len(candidate.parts) > 1 else Path(".")
-        resolved = (root / relative).resolve()
         try:
-            resolved.relative_to(root)
-        except ValueError:
-            raise PermissionError(f"path is outside repository {repository.name}: {path}")
-        return repository, str(resolved.relative_to(root)) or "."
+            resolved = guarded.resolve(relative, must_exist=False)
+        except OutsideWorkspaceError:
+            raise PermissionError(f"path is outside repository {repository.name}: {path}") from None
+        return guarded, guarded.relative_path(resolved, resolve=False)
+
+    def _bind_all(self) -> List[Tuple[str, GuardedRepository]]:
+        return [
+            (name, self.path_guard.bind(repository))
+            for name, repository in sorted(self._repositories.items())
+        ]
 
     @staticmethod
     def _virtual_path(repository_name: str, path: str) -> str:

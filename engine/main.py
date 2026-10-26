@@ -55,8 +55,13 @@ async def lifespan(app: FastAPI):
     dynamic_config.start_refresh()
 
     # 4) 初始化 Workspace 运行时；manager 按 workspace 惰性创建
-    app.state.workspace_registry = WorkspaceRegistry()
-    app.state.workspace_scanner = WorkspaceScanner()
+    app.state.workspace_registry = WorkspaceRegistry(
+        root=settings.workspace_metadata_path,
+        allowed_roots=settings.workspace_allowed_root_paths,
+    )
+    app.state.workspace_scanner = WorkspaceScanner(
+        path_guard=app.state.workspace_registry.path_guard
+    )
     app.state.agent_graph = build_agent_graph()
     app.state.dispatcher = get_agent_dispatcher()
     app.state.mcp_managers = {}
