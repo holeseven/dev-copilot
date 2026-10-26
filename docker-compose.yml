@@ -1,76 +1,102 @@
 # @author lxy
-# Dev Copilot 一键启动：Redis + MySQL + Python 引擎 + Java 数据服务
-# 用法：在本文件所在目录执行  docker compose up -d --build
-# 首次启动 MySQL 会自动执行 schema.sql 建库建表（agent_db）。
+# Local-only deployment. Copy .env.example to .env and provide every required value.
 
 services:
-  # ===== Redis：记忆存储 / CAS 抢占锁 / 任务队列 / 动态配置 =====
   redis:
     image: redis:7-alpine
     container_name: dev-copilot-redis
-    ports:
-      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
-    command: ["redis-server", "--appendonly", "yes"]
+    networks:
+      - backend
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
 
-  # ===== MySQL：会话/记忆/配置持久化（agent_db，首次启动自动建表）=====
   mysql:
     image: mysql:8.0
     container_name: dev-copilot-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: "${DEV_COPILOT_MYSQL_ROOT_PASSWORD:?required}"
       MYSQL_DATABASE: agent_db
+      MYSQL_USER: "${DEV_COPILOT_DB_USERNAME:-dev_copilot}"
+      MYSQL_PASSWORD: "${DEV_COPILOT_DB_PASSWORD:?required}"
       TZ: Asia/Shanghai
-    ports:
-      - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      # 首次初始化时自动执行建表脚本
       - ./java-service/src/main/resources/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h localhost -uroot -p"$${MYSQL_ROOT_PASSWORD}" --silent
       interval: 10s
       timeout: 5s
       retries: 10
 
-  # ===== Python Agent 引擎（核心，FastAPI + LangGraph）=====
   engine:
     build:
       context: ./engine
       dockerfile: Dockerfile
     container_name: dev-copilot-engine
     ports:
-      - "8000:8000"
-    env_file:
-      - .env
+      - "127.0.0.1:8000:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
-      # 容器内通过服务名访问 Redis（覆盖 .env 里的 localhost）
-      - REDIS_URL=redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/0
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      LLM_BASE_URL: "${LLM_BASE_URL:-https://api.deepseek.com/v1}"
+      LLM_MODEL: "${LLM_MODEL:-deepseek-chat}"
+      LLM_MODEL_L2: "${LLM_MODEL_L2:-}"
+      LLM_TEMPERATURE: "${LLM_TEMPERATURE:-0.7}"
+      LLM_TIMEOUT: "${LLM_TIMEOUT:-60}"
+      REDIS_MAX_CONNECTIONS: "${REDIS_MAX_CONNECTIONS:-20}"
+      DYNAMIC_CONFIG_KEY: "${DYNAMIC_CONFIG_KEY:-dev_copilot:config}"
+      CONFIG_REFRESH_INTERVAL: "${CONFIG_REFRESH_INTERVAL:-30}"
+      APP_NAME: "${APP_NAME:-dev-copilot-engine}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      WORKSPACE_ALLOWED_ROOTS: '["/workspace"]'
+      WORKSPACE_METADATA_DIR: /data/dev-copilot
+    volumes:
+      - type: bind
+        source: "${DEV_COPILOT_ALLOWED_ROOT:?required}"
+        target: /workspace
+        read_only: true
+      - type: volume
+        source: engine-metadata
+        target: /data/dev-copilot
+    networks:
+      - backend
+      - edge
     depends_on:
       redis:
         condition: service_healthy
 
-  # ===== Java 数据服务（Spring Boot 3.2 + MyBatis-Plus）=====
   java-service:
     build:
       context: ./java-service
       dockerfile: Dockerfile
     container_name: dev-copilot-java
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
-      # 用容器服务名覆盖 application.yml 中的 localhost
-      - SPRING_DATASOURCE_URL=jdbc:mysql://mysql:3306/agent_db?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-      - SPRING_DATASOURCE_USERNAME=root
-      - SPRING_DATASOURCE_PASSWORD=root
-      - SPRING_DATA_REDIS_HOST=redis
-      - SPRING_DATA_REDIS_PORT=6379
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/agent_db?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true"
+      SPRING_DATASOURCE_USERNAME: "${DEV_COPILOT_DB_USERNAME:-dev_copilot}"
+      SPRING_DATASOURCE_PASSWORD: "${DEV_COPILOT_DB_PASSWORD:?required}"
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+    networks:
+      - backend
+      - edge
     depends_on:
       mysql:
         condition: service_healthy
@@ -80,3 +106,9 @@ services:
 volumes:
   redis-data:
   mysql-data:
+  engine-metadata:
+
+networks:
+  backend:
+    internal: true
+  edge:

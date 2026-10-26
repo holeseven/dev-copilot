@@ -13,9 +13,9 @@ spring:
 
   # 数据源配置（HikariCP 连接池）
   datasource:
-    url: jdbc:mysql://localhost:3306/agent_db?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-    username: root
-    password: root
+    url: ${DEV_COPILOT_DB_URL:jdbc:mysql://localhost:3306/agent_db?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true}
+    username: ${DEV_COPILOT_DB_USERNAME:dev_copilot}
+    password: ${DEV_COPILOT_DB_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
       minimum-idle: 5
