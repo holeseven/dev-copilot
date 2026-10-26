@@ -116,14 +116,15 @@ class CodeSearchServer:
             return {"error": "pattern 参数不能为空", "matches": []}
 
         # 构建搜索路径
-        search_dir = Path(self.workspace_dir)
+        ws_resolved = Path(self.workspace_dir).resolve()
+        search_dir = ws_resolved
         if sub_path:
             search_dir = search_dir / sub_path
         search_dir = search_dir.resolve()
 
-        # 路径护栏
-        ws_resolved = Path(self.workspace_dir).resolve()
-        if not str(search_dir).startswith(str(ws_resolved)):
+        try:
+            search_dir.relative_to(ws_resolved)
+        except ValueError:
             return {"error": "搜索路径越界", "matches": []}
 
         if not search_dir.exists():
@@ -134,12 +135,22 @@ class CodeSearchServer:
             pattern, str(search_dir), file_glob, max_results
         )
         if rg_result is not None:
-            return rg_result
+            return self._relative_result_paths(rg_result, ws_resolved)
 
         # 降级：Python 遍历
-        return await self._search_with_python(
+        result = await self._search_with_python(
             pattern, search_dir, file_glob, max_results
         )
+        return self._relative_result_paths(result, ws_resolved)
+
+    @staticmethod
+    def _relative_result_paths(result: Dict[str, Any], workspace: Path) -> Dict[str, Any]:
+        for match in result.get("matches", []):
+            try:
+                match["file"] = str(Path(match["file"]).resolve().relative_to(workspace))
+            except ValueError:
+                match["file"] = Path(match["file"]).name
+        return result
 
     async def _search_with_ripgrep(
         self, pattern: str, search_dir: str, file_glob: str, max_results: int

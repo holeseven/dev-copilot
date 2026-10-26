@@ -16,34 +16,33 @@ from engine.config.settings import get_settings
 
 # ──────────────────────────── 路径安全校验 ────────────────────────────
 
-def _resolve_workspace() -> str:
+def _resolve_workspace(workspace_dir: Optional[str] = None) -> str:
     """获取并解析工作区绝对路径"""
-    settings = get_settings()
-    return os.path.realpath(os.path.expanduser(settings.workspace_dir))
+    if workspace_dir is None:
+        workspace_dir = get_settings().workspace_dir
+    return str(Path(workspace_dir).expanduser().resolve())
 
 
-def _safe_resolve(path: str) -> str:
+def _safe_resolve(path: str, workspace_dir: Optional[str] = None) -> str:
     """
     将用户传入路径解析为绝对路径，并校验是否在 workspace_dir 内。
     越界则抛出 PermissionError。
     """
-    workspace = _resolve_workspace()
-    # 相对路径以 workspace 为基准
-    if not os.path.isabs(path):
-        resolved = os.path.realpath(os.path.join(workspace, path))
-    else:
-        resolved = os.path.realpath(path)
-
-    if not resolved.startswith(workspace + os.sep) and resolved != workspace:
+    workspace = Path(_resolve_workspace(workspace_dir))
+    candidate = Path(path).expanduser()
+    resolved = (workspace / candidate).resolve() if not candidate.is_absolute() else candidate.resolve()
+    try:
+        resolved.relative_to(workspace)
+    except ValueError:
         raise PermissionError(
             f"路径越界: {path} 解析为 {resolved}，不在工作区 {workspace} 内"
         )
-    return resolved
+    return str(resolved)
 
 
 # ──────────────────────────── 工具函数 ────────────────────────────
 
-def list_dir(path: str = ".") -> List[str]:
+def list_dir(path: str = ".", workspace_dir: Optional[str] = None) -> List[str]:
     """
     列出目录内容，返回条目名列表。
 
@@ -52,7 +51,7 @@ def list_dir(path: str = ".") -> List[str]:
     Returns:
         目录内文件/子目录名称列表。
     """
-    resolved = _safe_resolve(path)
+    resolved = _safe_resolve(path, workspace_dir)
     if not os.path.isdir(resolved):
         raise FileNotFoundError(f"目录不存在: {resolved}")
     entries = sorted(os.listdir(resolved))
@@ -64,7 +63,12 @@ def list_dir(path: str = ".") -> List[str]:
     return result
 
 
-def read_file(path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> str:
+def read_file(
+    path: str,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+    workspace_dir: Optional[str] = None,
+) -> str:
     """
     读取文件内容，支持指定行号范围。
 
@@ -75,7 +79,7 @@ def read_file(path: str, start_line: Optional[int] = None, end_line: Optional[in
     Returns:
         文件内容字符串。
     """
-    resolved = _safe_resolve(path)
+    resolved = _safe_resolve(path, workspace_dir)
     if not os.path.isfile(resolved):
         raise FileNotFoundError(f"文件不存在: {resolved}")
 
@@ -90,7 +94,7 @@ def read_file(path: str, start_line: Optional[int] = None, end_line: Optional[in
     return "".join(lines)
 
 
-def write_file(path: str, content: str, create_dirs: bool = True) -> str:
+def write_file(path: str, content: str, create_dirs: bool = True, workspace_dir: Optional[str] = None) -> str:
     """
     写入/创建文件。
 
@@ -101,7 +105,7 @@ def write_file(path: str, content: str, create_dirs: bool = True) -> str:
     Returns:
         写入结果消息。
     """
-    resolved = _safe_resolve(path)
+    resolved = _safe_resolve(path, workspace_dir)
     if create_dirs:
         os.makedirs(os.path.dirname(resolved), exist_ok=True)
 
@@ -111,7 +115,7 @@ def write_file(path: str, content: str, create_dirs: bool = True) -> str:
     return f"已写入 {resolved}（{len(content)} 字节）"
 
 
-def edit_file(path: str, old_text: str, new_text: str) -> str:
+def edit_file(path: str, old_text: str, new_text: str, workspace_dir: Optional[str] = None) -> str:
     """
     搜索替换编辑文件中的文本片段。
 
@@ -122,7 +126,7 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
     Returns:
         编辑结果消息。
     """
-    resolved = _safe_resolve(path)
+    resolved = _safe_resolve(path, workspace_dir)
     if not os.path.isfile(resolved):
         raise FileNotFoundError(f"文件不存在: {resolved}")
 
@@ -142,7 +146,12 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
     return f"已编辑 {resolved}"
 
 
-def grep_code(pattern: str, path: str = ".", ignore_case: bool = False) -> List[str]:
+def grep_code(
+    pattern: str,
+    path: str = ".",
+    ignore_case: bool = False,
+    workspace_dir: Optional[str] = None,
+) -> List[str]:
     """
     在文件中搜索正则模式，返回匹配行（带文件路径和行号）。
 
@@ -153,7 +162,7 @@ def grep_code(pattern: str, path: str = ".", ignore_case: bool = False) -> List[
     Returns:
         匹配结果列表，格式: "文件:行号:内容"。
     """
-    resolved = _safe_resolve(path)
+    resolved = _safe_resolve(path, workspace_dir)
     flags = re.IGNORECASE if ignore_case else 0
     regex = re.compile(pattern, flags)
     results: List[str] = []
@@ -164,7 +173,7 @@ def grep_code(pattern: str, path: str = ".", ignore_case: bool = False) -> List[
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                 for lineno, line in enumerate(f, 1):
                     if regex.search(line):
-                        rel = os.path.relpath(fpath, _resolve_workspace())
+                        rel = os.path.relpath(fpath, _resolve_workspace(workspace_dir))
                         results.append(f"{rel}:{lineno}:{line.rstrip()}")
                         if len(results) >= max_results:
                             return
@@ -183,7 +192,7 @@ def grep_code(pattern: str, path: str = ".", ignore_case: bool = False) -> List[
     return results
 
 
-def find_files(glob_pattern: str, path: str = ".") -> List[str]:
+def find_files(glob_pattern: str, path: str = ".", workspace_dir: Optional[str] = None) -> List[str]:
     """
     按 glob 模式搜索文件名。
 
@@ -193,8 +202,8 @@ def find_files(glob_pattern: str, path: str = ".") -> List[str]:
     Returns:
         匹配的相对路径列表。
     """
-    resolved = _safe_resolve(path)
-    workspace = _resolve_workspace()
+    resolved = _safe_resolve(path, workspace_dir)
+    workspace = _resolve_workspace(workspace_dir)
     results: List[str] = []
     max_results = 100
 

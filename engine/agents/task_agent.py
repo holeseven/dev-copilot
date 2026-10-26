@@ -175,11 +175,11 @@ class TaskAgent:
     def _get_available_tools(self) -> List[Dict[str, Any]]:
         """获取 MCP 中所有可用的 dev_tools schema"""
         if self._mcp is None:
-            return self._default_dev_tools()
+            return []
 
         schemas = self._mcp.get_tool_schemas()
         if not schemas:
-            return self._default_dev_tools()
+            return []
 
         # 转为 OpenAI 工具格式
         tools = []
@@ -193,53 +193,3 @@ class TaskAgent:
                 },
             })
         return tools
-
-    @staticmethod
-    def _default_dev_tools() -> List[Dict[str, Any]]:
-        """当 MCP 不可用时的默认工具定义（用于 LLM 理解能力边界）"""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "read_file",
-                    "description": "读取指定路径的文件内容",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string", "description": "文件绝对路径"},
-                        },
-                        "required": ["path"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "write_file",
-                    "description": "写入内容到指定文件（高风险操作，需审批）",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string", "description": "文件绝对路径"},
-                            "content": {"type": "string", "description": "文件内容"},
-                        },
-                        "required": ["path", "content"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "run_command",
-                    "description": "在工作区内执行 Shell 命令（高风险操作，需审批）",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command": {"type": "string", "description": "要执行的命令"},
-                            "cwd": {"type": "string", "description": "工作目录，默认工作区根目录"},
-                        },
-                        "required": ["command"],
-                    },
-                },
-            },
-        ]

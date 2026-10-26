@@ -118,6 +118,8 @@ class MCPManager:
         elif provider_type == "mock":
             from engine.core.mcp.providers import MockToolProvider
             provider = MockToolProvider(name=config["name"])
+        elif provider_type == "local":
+            provider = config.get("provider")
 
         if provider is None:
             raise ValueError(f"不支持的 provider 类型: {provider_type}")
@@ -143,11 +145,16 @@ class MCPManager:
             return f"[ERROR] 工具 '{tool_name}' 未注册"
 
         last_error: Optional[Exception] = None
+        provider = tool_entry.get("provider")
+        if provider is None:
+            return f"[ERROR] 工具 '{tool_name}' 无可用 provider"
+        if not getattr(provider, "retry_on_error", True):
+            try:
+                return await provider.call_tool(tool_name, arguments)
+            except Exception as error:
+                return f"[ERROR] 工具 '{tool_name}' 调用失败: {error}"
         for attempt, backoff in enumerate(RETRY_BACKOFFS, 1):
             try:
-                provider = tool_entry.get("provider")
-                if provider is None:
-                    return f"[ERROR] 工具 '{tool_name}' 无可用 provider"
                 result = await provider.call_tool(tool_name, arguments)
                 return result
             except Exception as e:
