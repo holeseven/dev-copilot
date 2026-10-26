@@ -4,385 +4,390 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dev Copilot - AI 研发助手</title>
+    <title>Dev Copilot</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #1a1a2e;
-            color: #eaeaea;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
-        header {
-            background: #16213e;
-            padding: 16px 24px;
-            border-bottom: 1px solid #0f3460;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        header h1 {
-            font-size: 1.2rem;
-            color: #00d4ff;
-            font-weight: 600;
-        }
-        header .status {
-            font-size: 0.75rem;
-            color: #4ade80;
-            background: rgba(74, 222, 128, 0.1);
-            padding: 2px 8px;
-            border-radius: 10px;
-        }
-        #messages {
-            flex: 1;
-            overflow-y: auto;
-            padding: 20px 24px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        .msg {
-            max-width: 80%;
-            padding: 12px 16px;
-            border-radius: 12px;
-            line-height: 1.5;
-            font-size: 0.9rem;
-            white-space: pre-wrap;
-            word-break: break-word;
-        }
-        .msg.user {
-            align-self: flex-end;
-            background: #0f3460;
-            color: #e0e0e0;
-            border-bottom-right-radius: 4px;
-        }
-        .msg.assistant {
-            align-self: flex-start;
-            background: #1e2a4a;
-            color: #f0f0f0;
-            border-bottom-left-radius: 4px;
-        }
-        .msg.tool-call {
-            align-self: flex-start;
-            background: rgba(255, 193, 7, 0.1);
-            border: 1px solid rgba(255, 193, 7, 0.3);
-            color: #ffc107;
-            font-size: 0.8rem;
-            font-family: 'Fira Code', monospace;
-        }
-        .msg.error {
-            align-self: center;
-            background: rgba(239, 68, 68, 0.15);
-            border: 1px solid rgba(239, 68, 68, 0.4);
-            color: #ef4444;
-        }
-        .approval-box {
-            align-self: flex-start;
-            background: rgba(251, 146, 60, 0.1);
-            border: 1px solid rgba(251, 146, 60, 0.5);
-            padding: 16px;
-            border-radius: 12px;
-            max-width: 80%;
-        }
-        .approval-box h4 {
-            color: #fb923c;
-            margin-bottom: 8px;
-        }
-        .approval-box p {
-            font-size: 0.85rem;
-            margin-bottom: 12px;
-            color: #d1d5db;
-        }
-        .approval-box .btn-group {
-            display: flex;
-            gap: 8px;
-        }
-        .approval-box button {
-            padding: 6px 16px;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.85rem;
-            font-weight: 500;
-            transition: opacity 0.2s;
-        }
-        .approval-box button:hover { opacity: 0.85; }
-        .btn-approve { background: #4ade80; color: #1a1a2e; }
-        .btn-reject { background: #ef4444; color: #fff; }
-        #input-area {
-            padding: 16px 24px;
-            background: #16213e;
-            border-top: 1px solid #0f3460;
-            display: flex;
-            gap: 10px;
-        }
-        #input-area input {
-            flex: 1;
-            padding: 12px 16px;
-            border-radius: 8px;
-            border: 1px solid #0f3460;
-            background: #1a1a2e;
-            color: #eaeaea;
-            font-size: 0.9rem;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-        #input-area input:focus { border-color: #00d4ff; }
-        #input-area button {
-            padding: 12px 24px;
-            background: #00d4ff;
-            color: #1a1a2e;
-            border: none;
-            border-radius: 8px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        #input-area button:hover { background: #00b8d4; }
-        #input-area button:disabled {
-            background: #4a5568;
-            cursor: not-allowed;
-        }
-        .typing-indicator {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            background: #00d4ff;
-            border-radius: 50%;
-            animation: pulse 1s infinite;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 0.4; }
-            50% { opacity: 1; }
+        * { box-sizing: border-box; }
+        body { margin: 0; min-height: 100vh; font-family: system-ui, sans-serif; background: #111827; color: #e5e7eb; }
+        button, input, select { font: inherit; }
+        button { cursor: pointer; border: 0; border-radius: 6px; padding: 8px 12px; background: #38bdf8; color: #082f49; font-weight: 600; }
+        button:disabled { cursor: not-allowed; background: #475569; color: #cbd5e1; }
+        input, select { width: 100%; border: 1px solid #334155; border-radius: 6px; padding: 8px 10px; background: #0f172a; color: #e5e7eb; }
+        label { display: block; margin: 8px 0 4px; color: #cbd5e1; font-size: 0.82rem; }
+        .layout { min-height: 100vh; display: grid; grid-template-columns: minmax(280px, 340px) 1fr; }
+        aside { padding: 18px; background: #172033; border-right: 1px solid #334155; overflow-y: auto; }
+        aside h1 { margin: 0 0 18px; color: #38bdf8; font-size: 1.25rem; }
+        aside h2 { margin: 18px 0 8px; font-size: 0.95rem; }
+        .row { display: flex; gap: 8px; margin-top: 8px; }
+        .row > * { flex: 1; }
+        .panel { padding-bottom: 14px; border-bottom: 1px solid #334155; }
+        #repository-list { margin: 8px 0; padding-left: 20px; color: #cbd5e1; font-size: 0.86rem; }
+        #scan-summary { margin-top: 10px; padding: 10px; border-radius: 6px; background: #0f172a; white-space: pre-wrap; font-size: 0.8rem; }
+        main { min-width: 0; display: flex; flex-direction: column; height: 100vh; }
+        header { padding: 14px 20px; background: #172033; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; }
+        #status-badge { color: #4ade80; font-size: 0.8rem; }
+        #workspace-guide { margin: 24px; padding: 16px; border: 1px dashed #64748b; border-radius: 8px; color: #cbd5e1; }
+        #messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 10px; }
+        .msg { max-width: 82%; padding: 10px 14px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .msg.user { align-self: flex-end; background: #075985; }
+        .msg.assistant { align-self: flex-start; background: #1e293b; }
+        .msg.tool-call { align-self: flex-start; color: #facc15; border: 1px solid #854d0e; background: #42200655; font-size: 0.82rem; }
+        .msg.error { align-self: center; color: #fecaca; border: 1px solid #991b1b; background: #450a0a66; }
+        .approval-box { align-self: flex-start; padding: 14px; border: 1px solid #f97316; border-radius: 10px; background: #43140755; }
+        #input-area { display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid #334155; background: #172033; }
+        #user-input { flex: 1; }
+        .typing-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #38bdf8; animation: pulse 1s infinite; }
+        @keyframes pulse { 50% { opacity: 0.25; } }
+        @media (max-width: 720px) {
+            .layout { display: block; }
+            aside { border-right: 0; border-bottom: 1px solid #334155; }
+            main { height: 70vh; min-height: 520px; }
         }
     </style>
 </head>
 <body>
-    <header>
+<div class="layout">
+    <aside>
         <h1>Dev Copilot</h1>
-        <span class="status" id="status-badge">● 已连接</span>
-    </header>
+        <section class="panel">
+            <h2>Workspace</h2>
+            <select id="workspace-select" aria-label="Workspace"></select>
+            <div class="row">
+                <button id="activate-btn" type="button">激活</button>
+                <button id="refresh-btn" type="button">刷新</button>
+            </div>
+            <label for="workspace-id">新 Workspace ID</label>
+            <input id="workspace-id" placeholder="team-platform">
+            <label for="workspace-name">名称</label>
+            <input id="workspace-name" placeholder="Team Platform">
+            <button id="create-workspace-btn" type="button" style="margin-top:8px;width:100%">新建并激活</button>
+        </section>
+        <section>
+            <h2>仓库</h2>
+            <ul id="repository-list"><li>请选择 Workspace</li></ul>
+            <label for="repository-name">仓库名称</label>
+            <input id="repository-name" placeholder="order-service">
+            <label for="repository-path">本地路径</label>
+            <input id="repository-path" placeholder="D:\\code\\order-service">
+            <button id="add-repository-btn" type="button" style="margin-top:8px;width:100%">添加仓库</button>
+            <button id="scan-btn" type="button" style="margin-top:8px;width:100%">扫描当前 Workspace</button>
+            <div id="scan-summary" hidden></div>
+        </section>
+    </aside>
+    <main>
+        <header><span id="current-workspace">未选择 Workspace</span><span id="status-badge">● 已连接</span></header>
+        <div id="workspace-guide">请先在左侧创建或选择 Workspace，再开始跨仓库只读问答。</div>
+        <div id="messages"></div>
+        <div id="input-area">
+            <input id="user-input" placeholder="输入问题…" autocomplete="off" disabled>
+            <button id="send-btn" type="button" disabled>发送</button>
+        </div>
+    </main>
+</div>
+<script>
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('user-input');
+    const sendBtn = document.getElementById('send-btn');
+    const statusBadge = document.getElementById('status-badge');
+    const workspaceSelect = document.getElementById('workspace-select');
+    const guideEl = document.getElementById('workspace-guide');
+    const repositoryList = document.getElementById('repository-list');
+    const scanSummary = document.getElementById('scan-summary');
+    let currentWorkspaceId = null;
+    let sessionId = newSessionId();
+    let currentAssistantEl = null;
+    let isStreaming = false;
+    let streamGeneration = 0;
+    let activeStreamController = null;
+    let activeStreamReader = null;
 
-    <div id="messages"></div>
+    function newSessionId() { return 'session-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7); }
 
-    <div id="input-area">
-        <input type="text" id="user-input" placeholder="输入消息... (Enter 发送)" autocomplete="off" />
-        <button id="send-btn" onclick="sendMessage()">发送</button>
-    </div>
-
-    <script>
-        const messagesEl = document.getElementById('messages');
-        const inputEl = document.getElementById('user-input');
-        const sendBtn = document.getElementById('send-btn');
-        const statusBadge = document.getElementById('status-badge');
-
-        let sessionId = 'session-' + Date.now().toString(36);
-        let currentAssistantEl = null;
-        let isStreaming = false;
-
-        // Enter 键发送
-        inputEl.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-        });
-
-        function sendMessage() {
-            const text = inputEl.value.trim();
-            if (!text || isStreaming) return;
-
-            appendMessage('user', text);
-            inputEl.value = '';
-            startStreaming(text);
+    async function errorDetail(response) {
+        try {
+            const body = await response.json();
+            return body.detail || JSON.stringify(body);
+        } catch (_) {
+            return await response.text() || `HTTP ${response.status}`;
         }
+    }
 
-        function startStreaming(message) {
-            isStreaming = true;
-            sendBtn.disabled = true;
-            statusBadge.textContent = '● 生成中...';
-            statusBadge.style.color = '#fbbf24';
+    async function fetchJson(url, options) {
+        const response = await fetch(url, options);
+        if (!response.ok) throw new Error(await errorDetail(response));
+        if (response.status === 204) return null;
+        return response.json();
+    }
 
-            // 创建助手消息占位
-            currentAssistantEl = appendMessage('assistant', '');
-            const indicator = document.createElement('span');
-            indicator.className = 'typing-indicator';
-            currentAssistantEl.appendChild(indicator);
+    async function loadWorkspaces(preferredId) {
+        try {
+            const workspaces = await fetchJson('/workspaces');
+            workspaceSelect.innerHTML = '<option value="">选择 Workspace</option>';
+            workspaces.forEach(workspace => {
+                const option = document.createElement('option');
+                option.value = workspace.id;
+                option.textContent = `${workspace.name} (${workspace.id})`;
+                workspaceSelect.appendChild(option);
+            });
+            const nextId = preferredId || currentWorkspaceId;
+            if (nextId && workspaces.some(workspace => workspace.id === nextId)) {
+                workspaceSelect.value = nextId;
+                await selectWorkspace(nextId, false);
+            } else if (!currentWorkspaceId) {
+                setWorkspace(null);
+            }
+        } catch (error) { appendMessage('error', error.message); }
+    }
 
-            fetch('/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message, session_id: sessionId }),
-            }).then(response => {
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-                let firstToken = true;
+    async function selectWorkspace(workspaceId, activate = true) {
+        cancelActiveStream();
+        if (!workspaceId) { setWorkspace(null); return; }
+        try {
+            if (activate) await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}/activate`, { method: 'POST' });
+            const workspace = await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}`);
+            setWorkspace(workspace);
+            await fetch('/tools?workspace_id=' + encodeURIComponent(currentWorkspaceId)).then(async response => {
+                if (!response.ok) throw new Error(await errorDetail(response));
+                return response.json();
+            });
+        } catch (error) { appendMessage('error', error.message); }
+    }
 
-                function pump() {
-                    return reader.read().then(({ done, value }) => {
-                        if (done) {
-                            finishStreaming();
-                            return;
-                        }
-                        buffer += decoder.decode(value, { stream: true });
-                        const lines = buffer.split('\n');
-                        buffer = lines.pop() || '';
+    function setWorkspace(workspace) {
+        cancelActiveStream();
+        currentWorkspaceId = workspace ? workspace.id : null;
+        sessionId = newSessionId();
+        messagesEl.innerHTML = '';
+        scanSummary.hidden = true;
+        guideEl.hidden = Boolean(workspace);
+        inputEl.disabled = !workspace;
+        sendBtn.disabled = !workspace;
+        document.getElementById('current-workspace').textContent = workspace ? workspace.name : '未选择 Workspace';
+        repositoryList.innerHTML = '';
+        if (!workspace || workspace.repositories.length === 0) {
+            const item = document.createElement('li');
+            item.textContent = workspace ? '尚未添加仓库' : '请选择 Workspace';
+            repositoryList.appendChild(item);
+            return;
+        }
+        workspace.repositories.forEach(repository => {
+            const item = document.createElement('li');
+            item.textContent = `${repository.name} — ${repository.path}`;
+            repositoryList.appendChild(item);
+        });
+        appendMessage('assistant', `已切换到 ${workspace.name}，可以开始只读问答。`);
+    }
 
-                        for (const line of lines) {
-                            if (line.startsWith('event: ')) {
-                                handleEvent(line);
-                            } else if (line.startsWith('data: ')) {
-                                handleData(line, firstToken);
-                                firstToken = false;
-                            }
-                        }
-                        return pump();
-                    });
-                }
+    async function createWorkspace() {
+        const id = document.getElementById('workspace-id').value.trim();
+        const name = document.getElementById('workspace-name').value.trim();
+        if (!id || !name) return;
+        try {
+            await fetchJson('/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, name }) });
+            await fetchJson(`/workspaces/${encodeURIComponent(id)}/activate`, { method: 'POST' });
+            await loadWorkspaces(id);
+        } catch (error) { appendMessage('error', error.message); }
+    }
 
-                let currentEvent = '';
+    async function addRepository() {
+        if (!currentWorkspaceId) return;
+        const name = document.getElementById('repository-name').value.trim();
+        const local_path = document.getElementById('repository-path').value.trim();
+        if (!name || !local_path) return;
+        try {
+            const workspace = await fetchJson(`/workspaces/${encodeURIComponent(currentWorkspaceId)}/repositories`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, local_path })
+            });
+            setWorkspace(workspace);
+            workspaceSelect.value = workspace.id;
+        } catch (error) { appendMessage('error', error.message); }
+    }
 
-                function handleEvent(line) {
-                    currentEvent = line.slice(7).trim();
-                }
+    async function scanWorkspace() {
+        if (!currentWorkspaceId) return;
+        try {
+            const scans = await fetchJson(`/workspaces/${encodeURIComponent(currentWorkspaceId)}/scan`, { method: 'POST' });
+            scanSummary.hidden = false;
+            scanSummary.textContent = scans.length ? scans.map(scan =>
+                `${scan.repository}\n语言: ${scan.languages.join(', ') || '-'}\n构建: ${scan.build_systems.join(', ') || '-'}\n服务: ${scan.services.join(', ') || '-'}\n中间件: ${scan.middleware.join(', ') || '-'}`
+            ).join('\n\n') : '当前 Workspace 尚未注册仓库。';
+        } catch (error) { appendMessage('error', error.message); }
+    }
 
-                function handleData(line, isFirst) {
-                    const raw = line.slice(6);
+    function sendMessage() {
+        const text = inputEl.value.trim();
+        if (!text || isStreaming || !currentWorkspaceId) return;
+        appendMessage('user', text);
+        inputEl.value = '';
+        startStreaming(text);
+    }
+
+    async function startStreaming(message) {
+        const generation = ++streamGeneration;
+        const controller = new AbortController();
+        activeStreamController = controller;
+        isStreaming = true;
+        sendBtn.disabled = true;
+        statusBadge.textContent = '● 生成中…';
+        statusBadge.style.color = '#facc15';
+        const assistantEl = appendMessage('assistant', '');
+        currentAssistantEl = assistantEl;
+        const indicator = document.createElement('span');
+        indicator.className = 'typing-indicator';
+        assistantEl.appendChild(indicator);
+        let receivedMessageToken = false;
+        try {
+            const response = await fetch('/chat', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message, session_id: sessionId, workspace_id: currentWorkspaceId }),
+                signal: controller.signal,
+            });
+            if (generation !== streamGeneration) return;
+            if (!response.ok) throw new Error(await errorDetail(response));
+            await consumeEventStream(response, generation, assistantEl, receivedMessageToken);
+        } catch (error) {
+            if (generation === streamGeneration && error.name !== 'AbortError') {
+                appendMessage('error', error.message);
+            }
+        } finally { finishStreaming(generation); }
+    }
+
+    async function consumeEventStream(response, generation, assistantEl, receivedMessageToken = false) {
+        const reader = response.body.getReader();
+        if (generation !== streamGeneration) {
+            await reader.cancel();
+            return;
+        }
+        activeStreamReader = reader;
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = '';
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (generation !== streamGeneration || done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (generation !== streamGeneration) return;
+                    if (line.startsWith('event: ')) currentEvent = line.slice(7).trim();
+                    if (!line.startsWith('data: ')) continue;
                     let data;
-                    try { data = JSON.parse(raw); } catch { data = raw; }
-
+                    try { data = JSON.parse(line.slice(6)); } catch (_) { data = { message: line.slice(6) }; }
                     if (currentEvent === 'message' && data.token) {
-                        if (isFirst && currentAssistantEl) {
-                            // 移除 typing indicator
-                            const ind = currentAssistantEl.querySelector('.typing-indicator');
-                            if (ind) ind.remove();
+                        if (!receivedMessageToken) {
+                            receivedMessageToken = true;
+                            assistantEl.querySelector('.typing-indicator')?.remove();
                         }
-                        if (currentAssistantEl) {
-                            currentAssistantEl.textContent += data.token;
-                            scrollToBottom();
-                        }
+                        assistantEl.textContent += data.token;
                     } else if (currentEvent === 'tool') {
-                        const toolMsg = data.status === 'start'
-                            ? `🔧 调用工具: ${data.tool_name}`
-                            : `✅ 工具完成: ${data.tool_name}`;
-                        appendMessage('tool-call', toolMsg);
+                        const label = data.status === 'start' ? '调用工具' : data.status === 'error' ? '工具失败' : '工具完成';
+                        appendMessage('tool-call', `${label}: ${data.tool_name}`);
                     } else if (currentEvent === 'approval_required') {
                         showApprovalDialog(data);
                     } else if (currentEvent === 'error') {
-                        appendMessage('error', `❌ ${data.message || data}`);
-                    } else if (currentEvent === 'done') {
-                        finishStreaming();
+                        appendMessage('error', data.message || String(data));
                     }
                 }
+            }
+        } finally {
+            if (activeStreamReader === reader) activeStreamReader = null;
+        }
+    }
 
-                return pump();
-            }).catch(err => {
-                appendMessage('error', `❌ 网络错误: ${err.message}`);
-                finishStreaming();
+    function cancelActiveStream() {
+        streamGeneration += 1;
+        activeStreamController?.abort();
+        if (activeStreamReader) activeStreamReader.cancel().catch(() => {});
+        activeStreamController = null;
+        activeStreamReader = null;
+        currentAssistantEl = null;
+        isStreaming = false;
+        sendBtn.disabled = !currentWorkspaceId;
+        statusBadge.textContent = '● 已连接';
+        statusBadge.style.color = '#4ade80';
+        document.querySelectorAll('.typing-indicator').forEach(element => element.remove());
+    }
+
+    function finishStreaming(generation) {
+        if (generation !== streamGeneration) return;
+        isStreaming = false;
+        sendBtn.disabled = !currentWorkspaceId;
+        statusBadge.textContent = '● 已连接';
+        statusBadge.style.color = '#4ade80';
+        document.querySelectorAll('.typing-indicator').forEach(element => element.remove());
+        currentAssistantEl = null;
+        activeStreamController = null;
+        activeStreamReader = null;
+    }
+
+    function appendMessage(type, text) {
+        const element = document.createElement('div');
+        element.className = `msg ${type}`;
+        element.textContent = text;
+        messagesEl.appendChild(element);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return element;
+    }
+
+    function showApprovalDialog(data) {
+        const box = document.createElement('div');
+        box.className = 'approval-box';
+        const title = document.createElement('strong');
+        title.textContent = `需要审批：${data.action || '未知操作'}`;
+        box.appendChild(title);
+        const actions = document.createElement('div');
+        actions.className = 'row';
+        [['批准', true], ['拒绝', false]].forEach(([label, approved]) => {
+            const button = document.createElement('button');
+            button.textContent = label;
+            button.onclick = () => handleApproval(box, approved);
+            actions.appendChild(button);
+        });
+        box.appendChild(actions);
+        messagesEl.appendChild(box);
+    }
+
+    async function handleApproval(box, approved) {
+        cancelActiveStream();
+        const generation = ++streamGeneration;
+        const controller = new AbortController();
+        activeStreamController = controller;
+        try {
+            const response = await fetch('/chat/resume', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ thread_id: sessionId, approved, reason: '', workspace_id: currentWorkspaceId }),
+                signal: controller.signal,
             });
+            if (generation !== streamGeneration) return;
+            if (!response.ok) throw new Error(await errorDetail(response));
+            box.textContent = approved ? '已批准' : '已拒绝';
+            isStreaming = true;
+            sendBtn.disabled = true;
+            const assistantEl = appendMessage('assistant', '');
+            currentAssistantEl = assistantEl;
+            const indicator = document.createElement('span');
+            indicator.className = 'typing-indicator';
+            assistantEl.appendChild(indicator);
+            await consumeEventStream(response, generation, assistantEl);
+        } catch (error) {
+            if (generation === streamGeneration && error.name !== 'AbortError') {
+                appendMessage('error', error.message);
+            }
+        } finally {
+            finishStreaming(generation);
         }
+    }
 
-        function finishStreaming() {
-            isStreaming = false;
-            sendBtn.disabled = false;
-            statusBadge.textContent = '● 已连接';
-            statusBadge.style.color = '#4ade80';
-            currentAssistantEl = null;
-            // 移除残留的 typing indicator
-            document.querySelectorAll('.typing-indicator').forEach(el => el.remove());
-        }
-
-        function appendMessage(type, text) {
-            const el = document.createElement('div');
-            el.className = `msg ${type}`;
-            el.textContent = text;
-            messagesEl.appendChild(el);
-            scrollToBottom();
-            return el;
-        }
-
-        function showApprovalDialog(data) {
-            const box = document.createElement('div');
-            box.className = 'approval-box';
-            box.innerHTML = `
-                <h4>⚠️ 需要审批</h4>
-                <p><strong>操作:</strong> ${data.action || '未知'}</p>
-                <p>${data.message || ''}</p>
-                <p style="font-size:0.8rem;color:#9ca3af;">${data.details || ''}</p>
-                <div class="btn-group">
-                    <button class="btn-approve" onclick="handleApproval(this, true)">✓ 批准</button>
-                    <button class="btn-reject" onclick="handleApproval(this, false)">✗ 拒绝</button>
-                </div>
-            `;
-            messagesEl.appendChild(box);
-            scrollToBottom();
-        }
-
-        function handleApproval(btn, approved) {
-            const box = btn.closest('.approval-box');
-            const buttons = box.querySelectorAll('button');
-            buttons.forEach(b => b.disabled = true);
-
-            const reason = approved ? '' : (prompt('请输入拒绝原因（可选）:') || '');
-
-            fetch('/chat/resume', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    thread_id: sessionId,
-                    approved,
-                    reason,
-                }),
-            }).then(response => {
-                box.innerHTML += `<p style="margin-top:8px;color:${approved ? '#4ade80' : '#ef4444'};">
-                    ${approved ? '✓ 已批准' : '✗ 已拒绝'}${reason ? ' - ' + reason : ''}</p>`;
-
-                if (response.ok) {
-                    // 继续消费恢复流
-                    currentAssistantEl = appendMessage('assistant', '');
-                    const reader = response.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buffer = '';
-                    let currentEvent = '';
-
-                    function pump() {
-                        return reader.read().then(({ done, value }) => {
-                            if (done) { finishStreaming(); return; }
-                            buffer += decoder.decode(value, { stream: true });
-                            const lines = buffer.split('\n');
-                            buffer = lines.pop() || '';
-                            for (const line of lines) {
-                                if (line.startsWith('event: ')) {
-                                    currentEvent = line.slice(7).trim();
-                                } else if (line.startsWith('data: ')) {
-                                    let d; try { d = JSON.parse(line.slice(6)); } catch { d = {}; }
-                                    if (currentEvent === 'message' && d.token && currentAssistantEl) {
-                                        currentAssistantEl.textContent += d.token;
-                                        scrollToBottom();
-                                    } else if (currentEvent === 'done') {
-                                        finishStreaming();
-                                    }
-                                }
-                            }
-                            return pump();
-                        });
-                    }
-                    pump();
-                }
-            }).catch(err => {
-                appendMessage('error', `❌ 审批请求失败: ${err.message}`);
-            });
-        }
-
-        function scrollToBottom() {
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-        }
-
-        // 初始欢迎消息
-        appendMessage('assistant', '你好！我是 Dev Copilot，你的 AI 研发助手。有什么可以帮你的？');
-    </script>
+    workspaceSelect.addEventListener('change', () => selectWorkspace(workspaceSelect.value));
+    document.getElementById('activate-btn').addEventListener('click', () => selectWorkspace(workspaceSelect.value));
+    document.getElementById('refresh-btn').addEventListener('click', () => loadWorkspaces());
+    document.getElementById('create-workspace-btn').addEventListener('click', createWorkspace);
+    document.getElementById('add-repository-btn').addEventListener('click', addRepository);
+    document.getElementById('scan-btn').addEventListener('click', scanWorkspace);
+    sendBtn.addEventListener('click', sendMessage);
+    inputEl.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); } });
+    loadWorkspaces();
+</script>
 </body>
 </html>

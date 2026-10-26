@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
 from engine.core.streaming.sse_engine import sse_event_generator
-from engine.orchestrator.graph_builder import build_agent_graph
+from engine.api.workspaces import get_workspace_manager, resolve_workspace
 
 router = APIRouter()
 
@@ -26,6 +26,7 @@ class ChatRequest(BaseModel):
     """聊天请求体"""
     message: str = Field(..., min_length=1, description="用户消息")
     session_id: str = Field(default="default", description="会话 ID")
+    workspace_id: Optional[str] = Field(default=None, description="Workspace ID")
 
 
 class ResumeRequest(BaseModel):
@@ -33,12 +34,13 @@ class ResumeRequest(BaseModel):
     thread_id: str = Field(..., description="中断时的线程/会话 ID")
     approved: bool = Field(..., description="是否批准")
     reason: Optional[str] = Field(default="", description="拒绝原因（可选）")
+    workspace_id: Optional[str] = Field(default=None, description="Workspace ID")
 
 
 # ─── POST /chat ───────────────────────────────────────────────────────────────
 
 @router.post("")
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, http_request: Request):
     """
     聊天接口：接收用户消息，返回 SSE 流式响应。
 
@@ -50,8 +52,9 @@ async def chat(request: ChatRequest):
     """
     logger.info("收到聊天请求 | session={} | message={}", request.session_id, request.message[:80])
 
-    # 构建图实例
-    graph = build_agent_graph()
+    workspace = resolve_workspace(http_request, request.workspace_id)
+    manager = await get_workspace_manager(http_request, workspace)
+    graph = http_request.app.state.agent_graph
 
     # 初始状态
     initial_state = {
@@ -69,7 +72,10 @@ async def chat(request: ChatRequest):
     config = {
         "recursion_limit": 150,
         "configurable": {
+            "workspace_id": workspace.id,
             "session_id": request.session_id,
+            "mcp_manager": manager,
+            "dispatcher": http_request.app.state.dispatcher,
         },
     }
 
@@ -87,7 +93,7 @@ async def chat(request: ChatRequest):
 # ─── POST /chat/resume ────────────────────────────────────────────────────────
 
 @router.post("/resume")
-async def resume(request: ResumeRequest):
+async def resume(request: ResumeRequest, http_request: Request):
     """
     HITL 恢复接口：外部审批后恢复图执行。
 
@@ -103,6 +109,9 @@ async def resume(request: ResumeRequest):
     try:
         from langgraph.types import Command
 
+        workspace = resolve_workspace(http_request, request.workspace_id)
+        manager = await get_workspace_manager(http_request, workspace)
+
         # 构建恢复值
         resume_value = {
             "approved": request.approved,
@@ -110,24 +119,20 @@ async def resume(request: ResumeRequest):
             "reviewer": "user",
         }
 
-        # 构建图（实际生产中应从 checkpointer 恢复对应 thread 的图实例）
-        graph = build_agent_graph()
+        graph = http_request.app.state.agent_graph
 
         config = {
             "recursion_limit": 150,
             "configurable": {
                 "thread_id": request.thread_id,
+                "workspace_id": workspace.id,
+                "session_id": request.thread_id,
+                "mcp_manager": manager,
+                "dispatcher": http_request.app.state.dispatcher,
             },
         }
 
         # 使用 Command(resume=...) 恢复执行
-        # 注：完整实现需要持久化 checkpointer，此处为 SSE 流式恢复
-        resume_generator = sse_event_generator(
-            graph,
-            None,  # resume 模式不传 initial_state
-            {**config, "__resume_value": resume_value},
-        )
-
         return StreamingResponse(
             _resume_stream(graph, config, resume_value),
             media_type="text/event-stream",
@@ -138,6 +143,8 @@ async def resume(request: ResumeRequest):
             },
         )
 
+    except HTTPException:
+        raise
     except ImportError:
         raise HTTPException(status_code=501, detail="LangGraph Command 模块不可用")
     except Exception as exc:

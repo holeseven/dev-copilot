@@ -20,6 +20,8 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.callbacks.manager import adispatch_custom_event
+from langchain_core.runnables import RunnableConfig
 from loguru import logger
 
 from engine.core.dispatcher.dispatcher import get_agent_dispatcher
@@ -42,7 +44,9 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个智能助手，负责 {agent_role}。
 
 # ─── preprocess_node ──────────────────────────────────────────────────────────────
 
-async def preprocess_node(state: Dict[str, Any]) -> Dict[str, Any]:
+async def preprocess_node(
+    state: Dict[str, Any], config: RunnableConfig
+) -> Dict[str, Any]:
     """
     预处理节点：
     1. 从 MemoryRetriever 获取历史对话并注入 messages
@@ -56,8 +60,7 @@ async def preprocess_node(state: Dict[str, Any]) -> Dict[str, Any]:
     messages = list(state.get("messages", []))
 
     # ── 1. 注入记忆历史 ──
-    config = state.get("__config__", {})
-    configurable = config.get("configurable", {}) if config else {}
+    configurable = config.get("configurable", {})
     memory_retriever: MemoryRetriever | None = configurable.get("memory_retriever")
 
     if memory_retriever and session_id:
@@ -106,7 +109,9 @@ async def preprocess_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 # ─── agent_node ───────────────────────────────────────────────────────────────────
 
-async def agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
+async def agent_node(
+    state: Dict[str, Any], config: RunnableConfig
+) -> Dict[str, Any]:
     """
     ReAct 推理节点：
     - 使用绑定了工具 schema 的 LLM 进行推理
@@ -124,8 +129,7 @@ async def agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
     llm = get_llm_by_complexity(llm_complexity)
 
     # 绑定工具 schema（如有 MCP 可用工具）
-    config = state.get("__config__", {})
-    configurable = config.get("configurable", {}) if config else {}
+    configurable = config.get("configurable", {})
     mcp_manager: MCPManager | None = configurable.get("mcp_manager")
 
     if mcp_manager:
@@ -163,7 +167,9 @@ async def agent_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 # ─── check_early_termination ─────────────────────────────────────────────────────
 
-async def check_early_termination(state: Dict[str, Any]) -> Dict[str, Any]:
+async def check_early_termination(
+    state: Dict[str, Any], config: RunnableConfig
+) -> Dict[str, Any]:
     """
     终止条件检测：
     1. 迭代次数 >= max_iterations (默认 35) → 强制终止
@@ -193,7 +199,9 @@ async def check_early_termination(state: Dict[str, Any]) -> Dict[str, Any]:
 
 # ─── route_node ───────────────────────────────────────────────────────────────────
 
-async def route_node(state: Dict[str, Any]) -> Dict[str, Any]:
+async def route_node(
+    state: Dict[str, Any], config: RunnableConfig
+) -> Dict[str, Any]:
     """
     路由决策节点：
     - 检查最新 AIMessage 是否包含 tool_calls
@@ -216,7 +224,9 @@ async def route_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 # ─── tool_node ────────────────────────────────────────────────────────────────────
 
-async def tool_node(state: Dict[str, Any]) -> Dict[str, Any]:
+async def tool_node(
+    state: Dict[str, Any], config: RunnableConfig
+) -> Dict[str, Any]:
     """
     工具执行节点（ToolNode 容错实现）：
     - 从最新 AIMessage.tool_calls 提取工具调用
@@ -227,8 +237,7 @@ async def tool_node(state: Dict[str, Any]) -> Dict[str, Any]:
     logger.info("─── tool_node START ───")
 
     messages = list(state.get("messages", []))
-    config = state.get("__config__", {})
-    configurable = config.get("configurable", {}) if config else {}
+    configurable = config.get("configurable", {})
     mcp_manager: MCPManager | None = configurable.get("mcp_manager")
 
     if not messages:
@@ -275,15 +284,39 @@ async def tool_node(state: Dict[str, Any]) -> Dict[str, Any]:
             continue
 
         try:
+            await adispatch_custom_event(
+                "tool_status",
+                {"status": "start", "tool_name": tool_name},
+                config=config,
+            )
             result = await mcp_manager.call_tool(tool_name, tool_args)
-            # 正常结果
             result_content = str(result) if result is not None else "执行成功（无返回值）"
             tool_msg = ToolMessage(content=result_content, tool_call_id=tool_id)
             messages.append(tool_msg)
-            tool_results.append({"tool": tool_name, "status": "ok"})
-            logger.info("工具 {} 执行成功", tool_name)
+            if isinstance(result, str) and result.startswith("[ERROR]"):
+                await adispatch_custom_event(
+                    "tool_status",
+                    {"status": "error", "tool_name": tool_name},
+                    config=config,
+                )
+                tool_results.append(
+                    {"tool": tool_name, "status": "error", "msg": result}
+                )
+            else:
+                await adispatch_custom_event(
+                    "tool_status",
+                    {"status": "end", "tool_name": tool_name},
+                    config=config,
+                )
+                tool_results.append({"tool": tool_name, "status": "ok"})
+                logger.info("工具 {} 执行成功", tool_name)
 
         except Exception as e:
+            await adispatch_custom_event(
+                "tool_status",
+                {"status": "error", "tool_name": tool_name},
+                config=config,
+            )
             # 容错：将错误包装为 ToolMessage 回传 LLM
             error_content = (
                 f"[ERROR] 工具 '{tool_name}' 执行失败:\n"

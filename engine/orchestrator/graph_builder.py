@@ -19,7 +19,6 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from loguru import logger
 
-from engine.core.dispatcher.dispatcher import get_agent_dispatcher
 from engine.core.memory.memory_retriever import MemoryRetriever
 from engine.core.mcp.manager import MCPManager
 from engine.orchestrator.nodes import (
@@ -84,8 +83,6 @@ def _after_check(state: GraphState) -> Literal["route", "end"]:
 # ─── Graph 构建器 ─────────────────────────────────────────────────────────────────
 
 def build_agent_graph(
-    mcp_manager: Optional[MCPManager] = None,
-    memory_retriever: Optional[MemoryRetriever] = None,
     recursion_limit: int = 150,
 ) -> StateGraph:
     """
@@ -94,20 +91,11 @@ def build_agent_graph(
     流程：preprocess → agent → check → route →(tools → agent → check → route)* → END
 
     Args:
-        mcp_manager: MCP 工具管理器实例（为 None 则 ToolNode 无可用工具）
-        memory_retriever: 记忆检索器实例（为 None 则不注入历史）
         recursion_limit: 递归上限，默认 150
 
     Returns:
         编译好的 StateGraph 可执行实例
     """
-    # 将依赖注入到 config 中，节点通过 config 获取
-    config_data = {
-        "mcp_manager": mcp_manager,
-        "memory_retriever": memory_retriever,
-        "dispatcher": get_agent_dispatcher(),
-    }
-
     workflow = StateGraph(GraphState)
 
     # ── 注册节点 ──
@@ -159,10 +147,7 @@ async def run_graph(
     Returns:
         最终 state 字典
     """
-    graph = build_agent_graph(
-        mcp_manager=mcp_manager,
-        memory_retriever=memory_retriever,
-    )
+    graph = build_agent_graph()
 
     initial_state: GraphState = {
         "messages": [],
@@ -181,7 +166,6 @@ async def run_graph(
         "configurable": {
             "mcp_manager": mcp_manager,
             "memory_retriever": memory_retriever,
-            "dispatcher": get_agent_dispatcher(),
         },
     }
 

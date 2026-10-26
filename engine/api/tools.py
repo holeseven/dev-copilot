@@ -9,32 +9,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from engine.core.mcp.manager import MCPManager
+from engine.api.workspaces import get_workspace_manager, resolve_workspace
 
 router = APIRouter()
-
-# 模块级 MCPManager 引用（由 lifespan 初始化后注入）
-_mcp_manager: Optional[MCPManager] = None
-
-
-def set_mcp_manager(manager: MCPManager) -> None:
-    """由 main.py lifespan 调用，注入初始化好的 MCPManager 实例"""
-    global _mcp_manager
-    _mcp_manager = manager
-
-
-def _get_manager() -> MCPManager:
-    """获取 MCPManager 实例，未初始化则返回 503"""
-    if _mcp_manager is None:
-        raise HTTPException(
-            status_code=503,
-            detail="MCP Manager 尚未初始化，请稍后重试",
-        )
-    return _mcp_manager
 
 
 # ─── 响应模型 ─────────────────────────────────────────────────────────────────
@@ -43,7 +24,7 @@ class ToolInfo(BaseModel):
     """单个工具信息"""
     name: str
     description: str = ""
-    parameters: Dict[str, Any] = {}
+    parameters: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ToolListResponse(BaseModel):
@@ -56,20 +37,21 @@ class RefreshResponse(BaseModel):
     """刷新响应"""
     success: bool
     message: str
-    reconnected: List[str] = []
-    still_failed: List[str] = []
+    reconnected: List[str] = Field(default_factory=list)
+    still_failed: List[str] = Field(default_factory=list)
 
 
 # ─── GET /tools ───────────────────────────────────────────────────────────────
 
 @router.get("", response_model=ToolListResponse)
-async def list_tools():
+async def list_tools(request: Request, workspace_id: Optional[str] = None):
     """
     列出当前 MCP 已注册的所有工具。
 
     返回工具名称、描述及参数 schema。
     """
-    manager = _get_manager()
+    workspace = resolve_workspace(request, workspace_id)
+    manager = await get_workspace_manager(request, workspace)
     schemas = manager.get_tool_schemas()
 
     tools = []
@@ -88,13 +70,14 @@ async def list_tools():
 # ─── POST /tools/refresh ──────────────────────────────────────────────────────
 
 @router.post("/refresh", response_model=RefreshResponse)
-async def refresh_tools():
+async def refresh_tools(request: Request, workspace_id: Optional[str] = None):
     """
     触发 MCP 自愈刷新：重连失败的 Server 并增量更新工具注册表。
 
     该操作是幂等的，可以安全重复调用。
     """
-    manager = _get_manager()
+    workspace = resolve_workspace(request, workspace_id)
+    manager = await get_workspace_manager(request, workspace)
 
     failed_before = list(manager._failed_servers)
     logger.info("触发 MCP 刷新 | 当前失败 Server: {}", failed_before)

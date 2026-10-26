@@ -3,13 +3,14 @@
 Dev Copilot 引擎 FastAPI 入口
 
 采用 lifespan 生命周期模式：
-- 启动时：初始化 Redis 连接池、LLM 客户端、加载动态配置、MCP manager（占位）
-- 关闭时：优雅释放上述资源
+- 启动时：初始化 Redis、LLM、动态配置与共享 Workspace 运行时
+- 关闭时：释放全部 Workspace manager 和基础设施资源
 
 业务路由（chat/tasks/tools 等）后续由各模块补充后挂载到这里。
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +23,10 @@ from engine.config.settings import get_settings
 from engine.infra.dynamic_config import get_dynamic_config
 from engine.infra.llm_client import Complexity, get_llm_by_complexity
 from engine.infra.redis_client import close_redis, init_redis
+from engine.core.dispatcher.dispatcher import get_agent_dispatcher
+from engine.core.workspace.registry import WorkspaceRegistry
+from engine.core.workspace.scanner import WorkspaceScanner
+from engine.orchestrator.graph_builder import build_agent_graph
 
 
 def _setup_logging() -> None:
@@ -49,9 +54,13 @@ async def lifespan(app: FastAPI):
     await dynamic_config.load_all()
     dynamic_config.start_refresh()
 
-    # 4) MCP manager 初始化（占位：后续任务实现三层容错工具链）
-    # TODO(后续任务): 初始化 MCP manager，并行连接工具 Server
-    logger.info("MCP manager 初始化占位——待后续任务实现")
+    # 4) 初始化 Workspace 运行时；manager 按 workspace 惰性创建
+    app.state.workspace_registry = WorkspaceRegistry()
+    app.state.workspace_scanner = WorkspaceScanner()
+    app.state.agent_graph = build_agent_graph()
+    app.state.dispatcher = get_agent_dispatcher()
+    app.state.mcp_managers = {}
+    app.state.workspace_manager_lock = asyncio.Lock()
 
     logger.info("{} 启动完成", settings.app_name)
     try:
@@ -59,6 +68,8 @@ async def lifespan(app: FastAPI):
     finally:
         # 关闭阶段：逆序释放资源
         logger.info("正在关闭 {} ...", settings.app_name)
+        for manager in list(app.state.mcp_managers.values()):
+            await manager.shutdown()
         await dynamic_config.stop_refresh()
         await close_redis()
         logger.info("{} 已关闭", settings.app_name)
@@ -80,10 +91,11 @@ def create_app() -> FastAPI:
         return {"status": "ok", "app": settings.app_name}
 
     # ===== 业务路由挂载 =====
-    from engine.api import chat, tasks, tools
+    from engine.api import chat, tasks, tools, workspaces
     app.include_router(chat.router, prefix="/chat", tags=["chat"])
     app.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
     app.include_router(tools.router, prefix="/tools", tags=["tools"])
+    app.include_router(workspaces.router, prefix="/workspaces", tags=["workspaces"])
 
     # ===== 静态前端首页 =====
     _frontend_path = Path(__file__).parent / "frontend" / "index.html"

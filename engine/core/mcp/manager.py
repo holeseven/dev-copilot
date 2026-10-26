@@ -89,7 +89,8 @@ class MCPManager:
 
         # 启动自愈循环
         self._running = True
-        self._heal_task = asyncio.create_task(self._self_heal_loop())
+        if self._heal_task is None or self._heal_task.done():
+            self._heal_task = asyncio.create_task(self._self_heal_loop())
         logger.info(f"MCPManager 初始化完成: {len(results)} 个 Server，"
                     f"失败 {len(self._failed_servers)} 个")
         return results

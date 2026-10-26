@@ -2,23 +2,18 @@
 
 # AI 研发助手（Dev Copilot）
 
-> 基于 LangGraph + FastAPI 的多 Agent 协作引擎，支持 OpenSpec 四阶段需求交付、HITL 人机协同审批、CAS 抢占式调度与 MCP 三层容错工具链。
+> 基于 LangGraph + FastAPI 的研发助手引擎，可在本地 Workspace 中注册多个仓库并进行只读代码问答。
 
 ---
 
-## 功能亮点
+## 当前已验证能力
 
-- **Dispatcher 智能路由** — Flash LLM 结构化输出 + 800ms 超时降级规则兜底，动态选择 L1/L2 模型
-- **CAS 抢占式调度** — Redis SETNX + Lua 原子脚本 + 心跳续期（TTL 120s / 心跳 60s），拉模式任务队列
-- **记忆三层截断** — Redis ZSET 按时间戳存储，轮次≤10 / 单条≤500字 / 总量≤2000字，防 token 爆炸
-- **MCP 三层容错** — L1 并行初始化 / L2 退避重试(5-10-15s) / L3 后台自愈重连，混合工具源
-- **多 Agent Supervisor** — LLM-as-Planner 拆解子任务 + SubAgent-as-Tool 委派执行 + 结果整合
-- **OpenSpec 四阶段** — proposal → design → tasks → apply，每阶段 HITL 断点等待用户确认
-- **HITL 门控** — LangGraph `interrupt()` 原语实现高风险操作审核（write_file / git_commit 等）
-- **RAG 知识检索** — FAISS IndexFlatL2 + RecursiveCharacterTextSplitter，top-k 召回 + 距离阈值过滤
-- **SSE 流式输出** — `astream_events(v2)` 逐 token 推送，支持 tool/approval/done 多事件类型
-- **配置热更新** — Redis Hash + 本地缓存 + 30s 轮询刷新，对标 Diamond 配置中心
-- **Java 持久化** — Redis Stream → Spring Boot Consumer Group → MyBatis-Plus saveBatch → MySQL
+- **本地 Workspace** — 创建、列出、查询、激活和删除本机注册元数据
+- **多仓库注册与扫描** — 识别语言、构建系统、服务、中间件、显式依赖和 Git 信息
+- **Workspace 隔离工具** — 每个 Workspace 独立提供 `list_dir`、`find_files`、`grep_code`、`read_file`、`code_search` 五个只读工具
+- **Graph 工具闭环** — 模型可在一次会话中读取多个已注册仓库，再结合工具结果回答
+- **SSE 流式输出** — 逐 token 推送回答，并报告工具开始、完成或失败状态
+- **薄工作台** — 单页完成 Workspace 切换、仓库注册、扫描与只读聊天
 
 ---
 
@@ -26,27 +21,16 @@
 
 ```mermaid
 graph TB
-    User[用户请求] --> API[FastAPI Gateway]
-    API --> Dispatcher[Dispatcher 智能路由]
-    Dispatcher -->|L1 简单| Graph[LangGraph 编排图]
-    Dispatcher -->|L2 复杂| Supervisor[Supervisor 多 Agent 协作]
-    Supervisor --> Graph
-
-    Graph --> Memory[Memory 记忆<br/>Redis ZSET + 三层截断]
-    Graph --> MCP[MCP 工具链<br/>三层容错]
-    Graph --> HITL[HITL 门控<br/>interrupt]
-    Graph --> RAG[RAG 检索<br/>FAISS]
-    Graph --> SSE[SSE 流式引擎]
-    SSE --> Frontend[前端]
-
-    Memory --> Redis[(Redis)]
-    MCP --> ToolServer[远程 MCP Server]
-    Redis --> Stream[Redis Stream]
-    Stream --> Java[Java Service<br/>Spring Boot]
-    Java --> MySQL[(MySQL)]
-
-    DynConfig[Redis Hash 动态配置] -.->|热更新| Dispatcher
-    DynConfig -.->|热更新| Graph
+    Frontend[Workspace 工作台] --> API[FastAPI]
+    API --> Registry[Workspace Registry]
+    API --> Scanner[Workspace Scanner]
+    API --> Graph[共享 LangGraph]
+    Registry --> Manager[按 Workspace 懒建 MCPManager]
+    Manager --> Tools[五个本地只读工具]
+    Tools --> Repositories[已注册本地仓库]
+    Graph --> Manager
+    Graph --> SSE[SSE 消息与工具状态]
+    SSE --> Frontend
 ```
 
 ---
@@ -81,6 +65,34 @@ docker compose up -d --build
 ```
 
 > 本地开发快捷命令：`cd engine && pip install -e . && python -m engine.main`（需本地 Redis）
+
+---
+
+## 本地 Workspace 使用
+
+启动引擎后打开 `http://localhost:8000`：
+
+1. 输入 Workspace ID 和名称，点击“新建并激活”。
+2. 输入仓库名称与本地绝对路径，点击“添加仓库”；可重复添加多个仓库。
+3. 点击“扫描当前 Workspace”，查看每个仓库的语言、构建系统、服务和中间件摘要。
+4. 在聊天区提问，例如“读取 `order-service` 和 `platform` 的配置，总结重试次数”。聊天和工具请求会绑定当前 Workspace，只能读取其中已注册仓库。
+
+同一流程也可通过 API 完成：
+
+```bash
+curl -X POST http://localhost:8000/workspaces \
+  -H "Content-Type: application/json" \
+  -d '{"id":"local-dev","name":"Local Dev"}'
+
+curl -X POST http://localhost:8000/workspaces/local-dev/repositories \
+  -H "Content-Type: application/json" \
+  -d '{"name":"order-service","local_path":"/absolute/path/order-service"}'
+
+curl -X POST http://localhost:8000/workspaces/local-dev/scan
+curl -X POST http://localhost:8000/workspaces/local-dev/activate
+```
+
+`GET /tools?workspace_id=local-dev` 可查看该 Workspace 的五个只读工具 schema。`POST /chat` 的请求体使用相同的 `workspace_id`，并通过 SSE 返回回答与工具状态。
 
 ---
 
@@ -182,9 +194,9 @@ agent/
 │   │   ├── memory/              # ZSET 记忆 + 三层截断格式化
 │   │   ├── mcp/                 # MCP 三层容错 + 混合工具源
 │   │   ├── orchestrator/        # Supervisor + Planner + SubAgentTool
-│   │   ├── openspec/            # 四阶段工作流（proposal→apply）
-│   │   ├── hitl/                # HITL 人机协同中断门控
-│   │   ├── rag/                 # FAISS 向量检索 + Retriever
+│   │   ├── openspec/            # OpenSpec 模块
+│   │   ├── hitl/                # 审批模块
+│   │   ├── rag/                 # 检索模块
 │   │   └── streaming/           # SSE 流式引擎
 │   ├── orchestrator/            # LangGraph 编排（graph_builder / nodes）
 │   ├── api/                     # REST 路由（chat / tasks / tools）
@@ -210,10 +222,10 @@ agent/
 
 ## 核心设计理念
 
-1. **渐进式交付** — 不追求一步生成代码，通过四阶段 HITL 断点确保 AI 产出可控、可审、可回退
-2. **双栈协作** — Python 专注 AI 编排（异步高性能），Java 专注数据持久化（事务安全、生态成熟）
-3. **纵深防御** — 路由超时降级、记忆三层截断、MCP 三层容错、工具调用错误回传 LLM 自主决策
-4. **配置驱动** — 模型选择/轮次限制/工具列表均可热更新，无需重启服务
+1. **Workspace 隔离** — 本地工具固定绑定一个 Workspace，只解析其中已注册仓库的虚拟路径
+2. **只读优先** — 当前工具 schema 仅包含目录浏览、文件查找、代码搜索和文件读取
+3. **请求级依赖** — Chat 与 Tools 按请求解析显式或 active Workspace，并向共享 Graph 传入对应 manager
+4. **确定性扫描** — 扫描结果来自支持的项目清单和 Git 元数据，按稳定顺序返回
 
 ---
 

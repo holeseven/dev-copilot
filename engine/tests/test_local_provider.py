@@ -120,3 +120,18 @@ async def test_manager_dispatches_local_provider_once_when_it_raises(tmp_path):
 
     assert calls == 1
     assert "outside workspace" in result
+
+
+@pytest.mark.asyncio
+async def test_repeated_manager_init_reuses_and_shutdown_closes_heal_task():
+    manager = MCPManager([])
+
+    await manager.init_all()
+    first_task = manager._heal_task
+    await manager.init_all()
+    second_task = manager._heal_task
+    await manager.shutdown()
+
+    assert first_task is second_task
+    assert first_task is not None
+    assert first_task.done()

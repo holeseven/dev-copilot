@@ -74,6 +74,9 @@ async def sse_event_generator(
                     "output": _safe_serialize(data.get("output")),
                 })
 
+            elif kind == "on_custom_event" and name == "tool_status":
+                yield _sse_line("tool", _safe_serialize(data))
+
             # ── HITL 中断（interrupt）──
             elif kind == "on_chain_end" and "interrupt" in str(data).lower():
                 # 检测 interrupt payload
