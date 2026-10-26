@@ -99,7 +99,7 @@ class PythonAgentClientTest {
         assertThatThrownBy(() -> client.streamChat(validRequest()).blockLast(Duration.ofSeconds(3)))
                 .isInstanceOf(PythonAgentGatewayException.class)
                 .hasMessageContaining("422")
-                .hasMessageContaining("workspace missing");
+                .hasMessageNotContaining("workspace missing");
     }
 
     @Test

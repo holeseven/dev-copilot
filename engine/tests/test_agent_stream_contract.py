@@ -180,6 +180,13 @@ async def test_chat_stream_emits_error_before_done(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert _parse_sse(response.text) == [
-        ("error", {"message": "graph failed"}),
-        ("done", {"status": "completed"}),
+        (
+            "error",
+            {
+                "code": "agent_execution_failed",
+                "message": "Agent 执行失败，请重试",
+            },
+        ),
+        ("done", {"status": "failed"}),
     ]
+    assert "graph failed" not in response.text

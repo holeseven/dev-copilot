@@ -42,6 +42,7 @@ async def sse_event_generator(
     """
     run_config = config or {"recursion_limit": 150}
 
+    failed = False
     try:
         async for event in graph.astream_events(
             initial_state, config=run_config, version="v2"
@@ -101,11 +102,15 @@ async def sse_event_generator(
                     })
 
     except Exception as exc:
+        failed = True
         logger.opt(exception=True).error("SSE 流异常: {}", str(exc))
-        yield _sse_line("error", {"message": str(exc)})
+        yield _sse_line("error", {
+            "code": "agent_execution_failed",
+            "message": "Agent 执行失败，请重试",
+        })
 
     # ── 流结束标记 ──
-    yield _sse_line("done", {"status": "completed"})
+    yield _sse_line("done", {"status": "failed" if failed else "completed"})
 
 
 def _safe_serialize(obj: Any) -> Any:

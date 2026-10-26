@@ -50,12 +50,12 @@ public class PythonAgentClient {
                         return response.bodyToFlux(SSE_TYPE);
                     }
                     int status = response.statusCode().value();
-                    return response.bodyToMono(String.class)
-                            .defaultIfEmpty("")
-                            .flatMapMany(body -> Flux.error(new PythonAgentGatewayException(
-                                    "Python Agent 返回异常状态 " + status + ": " + body,
+                    return response.releaseBody().thenMany(Flux.error(
+                            new PythonAgentGatewayException(
+                                    "Python Agent 返回异常状态 " + status,
                                     status
-                            )));
+                            )
+                    ));
                 })
                 .onErrorMap(
                         WebClientRequestException.class,
