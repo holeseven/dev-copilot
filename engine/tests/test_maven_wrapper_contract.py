@@ -51,3 +51,11 @@ def test_wrapper_pins_verified_maven_distribution() -> None:
     )
     assert urlparse(properties["distributionUrl"]).scheme == "https"
     assert re.fullmatch(r"[0-9a-f]{64}", properties["distributionSha256Sum"])
+
+
+def test_windows_wrapper_handles_a_regular_existing_maven_home() -> None:
+    script = (JAVA_SERVICE / "mvnw.cmd").read_text(encoding="utf-8")
+
+    assert "$mavenM2Target = (Get-Item $MAVEN_M2_PATH).Target" in script
+    assert "if (!$mavenM2Target)" in script
+    assert "(Get-Item $MAVEN_M2_PATH).Target[0]" not in script
