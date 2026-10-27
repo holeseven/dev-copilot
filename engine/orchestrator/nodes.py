@@ -85,8 +85,8 @@ async def preprocess_node(
         target_agent_id = decision.target_agent_id
         complexity_level = decision.complexity_level or "L2"
         logger.info("路由决策: agent={} complexity={}", target_agent_id, complexity_level)
-    except Exception as e:
-        logger.warning("路由失败，降级到 qa_agent: {}", str(e))
+    except Exception:
+        logger.warning("路由失败，降级到 qa_agent | code=dispatcher_unavailable")
         target_agent_id = "qa_agent"
         complexity_level = "L2"
 
@@ -159,15 +159,9 @@ async def agent_node(
             bool(getattr(response, "tool_calls", None)),
             len(response.content) if response.content else 0,
         )
-    except Exception as e:
-        logger.error("agent_node LLM 调用失败: {}", str(e))
-        error_msg = AIMessage(content=f"抱歉，推理过程出现错误: {str(e)}")
-        messages.append(error_msg)
-        return {
-            "messages": messages,
-            "iteration_count": iteration_count + 1,
-            "should_terminate": True,
-        }
+    except Exception:
+        logger.error("agent_node LLM 调用失败")
+        raise
 
     logger.info("─── agent_node END ───")
     return {

@@ -98,9 +98,9 @@ async def sse_event_generator(
                     awaiting_approval = True
                     yield _sse_line("approval_required", approval)
 
-    except Exception as exc:
+    except Exception:
         failed = True
-        logger.opt(exception=True).error("SSE 流异常: {}", str(exc))
+        logger.error("SSE 流异常 | code=agent_execution_failed")
         yield _sse_line("error", {
             "code": "agent_execution_failed",
             "message": "Agent 执行失败，请重试",

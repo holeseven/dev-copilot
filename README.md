@@ -150,11 +150,16 @@ npm --prefix web run dev
 
 点击“添加 Workspace”可登记本地项目。浏览器目录选择器受安全模型限制，不能把绝对路径交给后端，因此页面只用它辅助填写仓库名称；仍需填写 **Java/Python 服务实际可访问的绝对路径**。Docker 模式下应填写 `/workspace/...`，本地进程模式下填写宿主机真实路径。源码不会被浏览器上传。
 
-本地前端要求 Node.js `20.19.x`。运行完整验证（Python、旧前端流测试、React 测试与构建、前端架构测试和 Java 单元测试会按顺序执行，任一失败即停止）：
+## 一键验证与 CI
+
+本地一键验证要求预先安装 Python 3.12、[uv](https://docs.astral.sh/uv/)、Node.js 20.19.x、Java 17；Java 测试使用仓库自带的 Maven Wrapper，首次运行需要联网下载 Maven。先安装 Web 依赖，再从仓库根目录运行门禁：
 
 ```bash
+npm ci --prefix web
 uv run --project engine --frozen --extra dev python scripts/verify.py
 ```
+
+门禁会按顺序检查 `uv.lock`，编译并测试 Python，测试并构建 React 工作台，最后运行 Java 单元测试；任一步失败都会立即停止。GitHub Actions 会在 push 和 pull request 上使用相同门禁，并以冻结的 Python 依赖安装保证锁文件不被 CI 隐式更新。
 
 ## 环境变量
 
@@ -200,7 +205,7 @@ dev-copilot/
 └── web/                      # React 19 / TypeScript / Vite 产品工作台
 ```
 
-`engine/core/rag`、`engine/core/openspec`、`engine/core/orchestrator` 和部分 `agents` 文件是实验或演进中的模块，目前未形成完整产品主链路。
+`engine/core/rag` 已接入 Workspace 知识索引主链路；`engine/core/openspec`、部分 `engine/core/orchestrator` 与 `agents` 文件仍是实验或演进中的模块，尚未形成完整产品主链路。
 
 ## API 使用提示
 
@@ -212,6 +217,6 @@ dev-copilot/
 
 ## License
 
-MIT
+[MIT License](LICENSE)
 
 作者：lxy

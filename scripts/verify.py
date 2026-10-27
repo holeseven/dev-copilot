@@ -24,18 +24,31 @@ class Command:
 def build_commands(
     *,
     repository_root: Path,
-    python_executable: str,
     platform: str,
 ) -> list[Command]:
     """Build the required Python, frontend, and Java verification commands."""
 
     java_root = repository_root / "java-service"
     is_windows = platform == "win32"
+    uv = "uv.exe" if is_windows else "uv"
     npm = "npm.cmd" if is_windows else "npm"
     wrapper = java_root / ("mvnw.cmd" if is_windows else "mvnw")
     return [
+        Command((uv, "lock", "--check", "--project", "engine"), repository_root),
         Command(
-            (python_executable, "-m", "pytest", "engine/tests", "-q"),
+            (
+                uv, "run", "--project", "engine", "--frozen", "--extra", "dev",
+                "python", "-m", "compileall", "-q", "engine/main.py", "engine/agents",
+                "engine/api", "engine/config", "engine/core", "engine/infra",
+                "engine/orchestrator",
+            ),
+            repository_root,
+        ),
+        Command(
+            (
+                uv, "run", "--project", "engine", "--frozen", "--extra", "dev",
+                "python", "-m", "pytest", "engine/tests", "-q",
+            ),
             repository_root,
         ),
         Command((npm, "test"), repository_root),
@@ -54,7 +67,6 @@ def run(commands: Iterable[Command]) -> None:
 def main() -> int:
     commands = build_commands(
         repository_root=REPOSITORY_ROOT,
-        python_executable=sys.executable,
         platform=sys.platform,
     )
     try:

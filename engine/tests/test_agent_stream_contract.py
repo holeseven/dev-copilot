@@ -1,14 +1,18 @@
 # @author lxy
 import asyncio
+from io import StringIO
 import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from loguru import logger
 
 from engine.api import chat
+from engine.core.streaming.sse_engine import sse_event_generator
 from engine.core.workspace.registry import WorkspaceRegistry
+from engine.orchestrator.graph_builder import build_agent_graph
 
 
 def _parse_sse(body: str) -> list[tuple[str, dict]]:
@@ -494,6 +498,92 @@ async def test_chat_stream_emits_error_before_done(tmp_path, monkeypatch):
         ("done", {"status": "failed"}),
     ]
     assert "graph failed" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_real_graph_reports_sanitized_failure_when_bound_llm_ainvoke_fails(
+    monkeypatch,
+):
+    secret_error = "provider rejected key sk-secret at C:/private/project"
+    captured_logs = StringIO()
+    sink_id = logger.add(captured_logs, format="{message}")
+
+    class FailingBoundLlm:
+        def bind_tools(self, tools):
+            return self
+
+        async def ainvoke(self, messages):
+            raise RuntimeError(secret_error)
+
+    class Dispatcher:
+        async def route(self, query):
+            return SimpleNamespace(
+                target_agent_id="task_agent",
+                complexity_level="L2",
+            )
+
+    class Manager:
+        def get_tool_schemas(self):
+            return [
+                {
+                    "name": "read_file",
+                    "description": "Read a workspace file.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                }
+            ]
+
+    monkeypatch.setattr(
+        "engine.orchestrator.nodes.get_llm_by_complexity",
+        lambda _: FailingBoundLlm(),
+    )
+    graph = build_agent_graph()
+    initial_state = {
+        "messages": [],
+        "session_id": "session-llm-failure",
+        "user_query": "inspect the repository",
+        "target_agent_id": "",
+        "complexity_level": "L2",
+        "iteration_count": 0,
+        "max_iterations": 35,
+        "should_terminate": False,
+        "tool_results": [],
+    }
+    config = {
+        "recursion_limit": 150,
+        "configurable": {
+            "thread_id": "thread-llm-failure",
+            "workspace_id": "workspace-1",
+            "session_id": "session-llm-failure",
+            "dispatcher": Dispatcher(),
+            "mcp_manager": Manager(),
+        },
+    }
+
+    try:
+        frames = [
+            frame
+            async for frame in sse_event_generator(graph, initial_state, config)
+        ]
+    finally:
+        logger.remove(sink_id)
+
+    body = "".join(frames)
+    assert _parse_sse(body) == [
+        (
+            "error",
+            {
+                "code": "agent_execution_failed",
+                "message": "Agent 执行失败，请重试",
+            },
+        ),
+        ("done", {"status": "failed"}),
+    ]
+    assert secret_error not in body
+    assert secret_error not in captured_logs.getvalue()
 
 
 @pytest.mark.asyncio

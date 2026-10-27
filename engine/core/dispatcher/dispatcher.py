@@ -82,16 +82,14 @@ class AgentDispatcher:
 
         except asyncio.TimeoutError:
             logger.warning(
-                "LLM 路由超时（{}ms），降级到规则兜底 | query={}",
+                "LLM 路由超时，降级到规则兜底 | code=router_timeout | timeout_ms={}",
                 self._config.timeout_ms,
-                query[:80],
             )
             return self._rule_based_fallback(query)
 
-        except Exception as exc:
-            logger.opt(exception=True).error(
-                "LLM 路由异常，降级到规则兜底 | error={}",
-                str(exc),
+        except Exception:
+            logger.error(
+                "LLM 路由异常，降级到规则兜底 | code=router_execution_failed"
             )
             return self._rule_based_fallback(query)
 

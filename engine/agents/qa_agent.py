@@ -94,9 +94,9 @@ class QAAgent:
             logger.info("QAAgent 回答完成 | len={}", len(answer))
             return answer
 
-        except Exception as e:
-            logger.error("QAAgent 执行异常: {}", str(e))
-            return f"回答过程中出现错误: {str(e)}"
+        except Exception:
+            logger.error("QAAgent 执行异常 | code=qa_agent_execution_failed")
+            return "回答过程中出现错误，请稍后重试。"
 
     async def stream_run(
         self,
@@ -132,6 +132,6 @@ class QAAgent:
             async for chunk in self._llm.astream(messages):
                 if chunk.content:
                     yield chunk.content
-        except Exception as e:
-            logger.error("QAAgent 流式执行异常: {}", str(e))
-            yield f"回答过程中出现错误: {str(e)}"
+        except Exception:
+            logger.error("QAAgent 流式执行异常 | code=qa_agent_stream_failed")
+            yield "回答过程中出现错误，请稍后重试。"

@@ -115,9 +115,12 @@ class TaskAgent:
                 tool_messages = await self._execute_tool_calls(response.tool_calls)
                 messages.extend(tool_messages)
 
-            except Exception as e:
-                logger.error("TaskAgent 第 {} 轮执行异常: {}", iteration, str(e))
-                return f"任务执行过程中出现错误（第 {iteration + 1} 轮）: {str(e)}"
+            except Exception:
+                logger.error(
+                    "TaskAgent 执行异常 | code=task_agent_execution_failed | iteration={}",
+                    iteration,
+                )
+                return "任务执行过程中出现错误，请稍后重试。"
 
         return "任务执行达到最大轮次限制，已强制停止。请检查任务复杂度或拆分子任务。"
 
@@ -145,9 +148,9 @@ class TaskAgent:
                         action=tool_name,
                         payload={"tool_name": tool_name, "arguments": tool_args},
                     )
-                except Exception as e:
+                except Exception:
                     results.append(ToolMessage(
-                        content=f"[BLOCKED] 操作 '{tool_name}' 需要人工审批: {str(e)}",
+                        content="[BLOCKED] 操作需要人工审批。",
                         tool_call_id=tool_id,
                     ))
                     continue
@@ -164,9 +167,9 @@ class TaskAgent:
                 result = await self._mcp.call_tool(tool_name, tool_args)
                 content = str(result) if result is not None else "执行成功"
                 results.append(ToolMessage(content=content, tool_call_id=tool_id))
-            except Exception as e:
+            except Exception:
                 results.append(ToolMessage(
-                    content=f"[ERROR] 工具 '{tool_name}' 执行失败: {str(e)}",
+                    content="[ERROR] 工具执行失败。",
                     tool_call_id=tool_id,
                 ))
 
