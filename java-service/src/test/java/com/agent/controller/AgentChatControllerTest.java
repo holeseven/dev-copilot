@@ -1,6 +1,7 @@
 package com.agent.controller;
 
 import com.agent.client.AgentChatRequest;
+import com.agent.client.AgentResumeRequest;
 import com.agent.client.PythonAgentClient;
 import com.agent.client.PythonAgentGatewayException;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,48 @@ class AgentChatControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
                 .andExpect(content().string("event:done\ndata:{\"status\":\"completed\"}\n\n"));
+    }
+
+    @Test
+    void exposesVersionedResumeSseEndpoint() throws Exception {
+        StubPythonAgentClient client = new StubPythonAgentClient(Flux.just(
+                ServerSentEvent.<String>builder("{\"status\":\"completed\"}").event("done").build()
+        ));
+        MockMvc mvc = standaloneSetup(new AgentChatController(client)).build();
+
+        MvcResult pending = mvc.perform(post("/api/v1/agent/chat/resume")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM)
+                        .content("""
+                                {"session_id":"session-1","workspace_id":"workspace-1","approval_id":"approval-1","approved":false,"reason":"not safe"}
+                                """))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mvc.perform(asyncDispatch(pending))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM));
+        assertThat(client.resumeCalls).isEqualTo(1);
+        assertThat(client.resumeRequest).isEqualTo(
+                new AgentResumeRequest("session-1", "workspace-1", "approval-1", false, "not safe"));
+    }
+
+    @Test
+    void resumeUsesTheSameSafeFailureSemantics() {
+        ServerSentEvent<String> message = ServerSentEvent.<String>builder("{\"token\":\"continuing\"}")
+                .event("message").build();
+        StubPythonAgentClient client = new StubPythonAgentClient(Flux.concat(
+                Flux.just(message), Flux.error(new IllegalStateException("secret"))
+        ));
+
+        List<ServerSentEvent<String>> events = new AgentChatController(client)
+                .resume(new AgentResumeRequest("session-1", "workspace-1", "approval-1", true, null))
+                .collectList().block();
+
+        assertThat(events).extracting(ServerSentEvent::event)
+                .containsExactly("message", "error", "done");
+        assertThat(events.get(1).data()).doesNotContain("secret");
+        assertThat(events.get(2).data()).isEqualTo("{\"status\":\"failed\"}");
     }
 
     @Test
@@ -158,7 +201,7 @@ class AgentChatControllerTest {
         ).doOnCancel(() -> afterFirstCancelled.set(true));
 
         new AgentChatController(new StubPythonAgentClient(firstThenNever))
-                .chat(validRequest())
+                .resume(new AgentResumeRequest("session-1", "workspace-1", "approval-1", true, null))
                 .take(1)
                 .blockLast();
 
@@ -190,6 +233,8 @@ class AgentChatControllerTest {
     private static final class StubPythonAgentClient extends PythonAgentClient {
         private final Flux<ServerSentEvent<String>> result;
         private int calls;
+        private int resumeCalls;
+        private AgentResumeRequest resumeRequest;
 
         private StubPythonAgentClient(Flux<ServerSentEvent<String>> result) {
             super(WebClient.builder(), "http://127.0.0.1:1");
@@ -199,6 +244,13 @@ class AgentChatControllerTest {
         @Override
         public Flux<ServerSentEvent<String>> streamChat(AgentChatRequest request) {
             calls++;
+            return result;
+        }
+
+        @Override
+        public Flux<ServerSentEvent<String>> streamResume(AgentResumeRequest request) {
+            resumeCalls++;
+            resumeRequest = request;
             return result;
         }
     }

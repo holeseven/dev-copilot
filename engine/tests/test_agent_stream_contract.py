@@ -92,6 +92,32 @@ async def test_chat_stream_contract_and_graph_scope(tmp_path, monkeypatch):
                 "data": {"output": {"content": "ok"}},
             }
             yield {
+                "event": "on_custom_event",
+                "name": "file_change",
+                "data": {
+                    "tool_call_id": "apply-1",
+                    "virtual_path": "service/app.py",
+                    "operation": "replace",
+                    "after_sha256": "after",
+                    "repository_root": "C:/secret/root",
+                    "new_content": "must-not-leak",
+                },
+            }
+            yield {
+                "event": "on_custom_event",
+                "name": "verification",
+                "data": {
+                    "tool_call_id": "apply-1",
+                    "profile": "python_pytest",
+                    "status": "passed",
+                    "exit_code": 0,
+                    "stdout": "ok",
+                    "stderr": "",
+                    "truncated": False,
+                    "environment": {"SECRET": "must-not-leak"},
+                },
+            }
+            yield {
                 "event": "on_chain_stream",
                 "data": {
                     "chunk": {
@@ -147,6 +173,25 @@ async def test_chat_stream_contract_and_graph_scope(tmp_path, monkeypatch):
             {
                 "status": "end",
                 "tool_name": "read_file",
+            },
+        ),
+        (
+            "file_change",
+            {
+                "tool_call_id": "apply-1",
+                "virtual_path": "service/app.py",
+                "operation": "replace",
+                "after_sha256": "after",
+            },
+        ),
+        (
+            "verification",
+            {
+                "tool_call_id": "apply-1",
+                "profile": "python_pytest",
+                "status": "passed",
+                "exit_code": 0,
+                "truncated": False,
             },
         ),
         (

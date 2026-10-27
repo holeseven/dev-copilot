@@ -1,9 +1,12 @@
+# @author lxy
 import fnmatch
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from engine.core.mcp.approval import ToolApprovalRequest
 from engine.core.mcp.providers import ToolProvider
+from engine.core.workspace.change_service import ControlledChangeService
 from engine.core.workspace.path_guard import (
     GuardedRepository,
     OutsideWorkspaceError,
@@ -17,13 +20,24 @@ class LocalDevToolProvider(ToolProvider):
 
     retry_on_error = False
 
-    def __init__(self, name: str, workspace, path_guard: WorkspacePathGuard):
+    def __init__(
+        self,
+        name: str,
+        workspace,
+        path_guard: WorkspacePathGuard,
+        *,
+        change_service: Optional[ControlledChangeService] = None,
+    ):
         super().__init__(name)
         self.workspace = workspace
         self.path_guard = path_guard
         self._repositories = {
             repository.name: repository for repository in workspace.repositories
         }
+        self.change_service = change_service or ControlledChangeService(
+            workspace=workspace,
+            path_guard=path_guard,
+        )
 
     async def list_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -32,6 +46,42 @@ class LocalDevToolProvider(ToolProvider):
             self._schema("grep_code", "Search code with a regular expression.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "ignore_case": {"type": "boolean"}}, ["pattern"]),
             self._schema("read_file", "Read a file from the workspace.", {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, ["path"]),
             self._schema("code_search", "Search code in the workspace.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "file_glob": {"type": "string"}, "max_results": {"type": "integer"}}, ["pattern"]),
+            self._schema(
+                "preview_edit_file",
+                "Preview one exact UTF-8 replacement. Use the returned proposal with apply_workspace_change.",
+                {
+                    "path": {"type": "string"},
+                    "old_text": {"type": "string", "minLength": 1},
+                    "new_text": {"type": "string"},
+                    "validation_profile": {
+                        "type": "string",
+                        "enum": ["python_pytest", "maven_test", "npm_test"],
+                    },
+                },
+                ["path", "old_text", "new_text", "validation_profile"],
+            ),
+            self._schema(
+                "preview_create_file",
+                "Preview creation of one UTF-8 file. Use the returned proposal with apply_workspace_change.",
+                {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "validation_profile": {
+                        "type": "string",
+                        "enum": ["python_pytest", "maven_test", "npm_test"],
+                    },
+                },
+                ["path", "content", "validation_profile"],
+            ),
+            self._schema(
+                "apply_workspace_change",
+                "Request human approval, atomically apply a prepared change, then run its fixed test profile.",
+                {
+                    "proposal_id": {"type": "string"},
+                    "patch_sha256": {"type": "string"},
+                },
+                ["proposal_id", "patch_sha256"],
+            ),
         ]
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
@@ -45,11 +95,69 @@ class LocalDevToolProvider(ToolProvider):
             return self._read_file(arguments["path"], arguments.get("start_line"), arguments.get("end_line"))
         if tool_name == "code_search":
             return await self._code_search(arguments["pattern"], arguments.get("path", "."), arguments.get("file_glob", ""), arguments.get("max_results", 50))
+        if tool_name == "preview_edit_file":
+            self._require_exact_keys(
+                arguments, {"path", "old_text", "new_text", "validation_profile"}
+            )
+            return self.change_service.preview_replace(
+                arguments["path"],
+                arguments["old_text"],
+                arguments["new_text"],
+                arguments["validation_profile"],
+            )
+        if tool_name == "preview_create_file":
+            self._require_exact_keys(
+                arguments, {"path", "content", "validation_profile"}
+            )
+            return self.change_service.preview_create(
+                arguments["path"],
+                arguments["content"],
+                arguments["validation_profile"],
+            )
+        if tool_name == "apply_workspace_change":
+            raise PermissionError("workspace changes require an approved tool call")
         raise ValueError(f"unsupported local tool: {tool_name}")
+
+    async def prepare_approval(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Optional[ToolApprovalRequest]:
+        if tool_name != "apply_workspace_change":
+            return None
+        self._require_exact_keys(arguments, {"proposal_id", "patch_sha256"})
+        request = self.change_service.approval_request(
+            arguments["proposal_id"], arguments["patch_sha256"]
+        )
+        return ToolApprovalRequest(
+            approval_id=request.approval_id,
+            action=request.action,
+            payload=request.payload,
+        )
+
+    async def call_approved_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        approval_id: str,
+    ) -> Any:
+        if tool_name != "apply_workspace_change":
+            raise PermissionError("tool is not available for approved execution")
+        self._require_exact_keys(arguments, {"proposal_id", "patch_sha256"})
+        return await self.change_service.apply_approved(
+            arguments["proposal_id"],
+            arguments["patch_sha256"],
+            approval_id,
+        )
 
     @staticmethod
     def _schema(name: str, description: str, properties: Dict[str, Any], required: Optional[List[str]] = None) -> Dict[str, Any]:
-        return {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required or []}}
+        return {"name": name, "description": description, "parameters": {"type": "object", "properties": properties, "required": required or [], "additionalProperties": False}}
+
+    @staticmethod
+    def _require_exact_keys(arguments: Dict[str, Any], expected: set[str]) -> None:
+        if not isinstance(arguments, dict) or set(arguments) != expected:
+            raise ValueError("tool arguments do not match the required schema")
+        if any(not isinstance(arguments[key], str) for key in expected):
+            raise ValueError("tool arguments must be strings")
 
     def _list_dir(self, path: str) -> List[str]:
         if path == ".":

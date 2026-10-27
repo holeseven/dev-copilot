@@ -1,7 +1,7 @@
 // @author lxy
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { streamChat } from "./chat";
+import { streamChat, streamResume } from "./chat";
 
 const encoder = new TextEncoder();
 
@@ -62,5 +62,32 @@ describe("streamChat", () => {
       { event: "message", data: { token: "hello" } },
       { event: "done", data: { status: "completed" } },
     ]);
+  });
+
+  it("posts only the resume contract fields to the Java SSE endpoint", async () => {
+    const signal = new AbortController().signal;
+    const fetchMock = vi.fn().mockResolvedValue(sseResponse(
+      "event: done\ndata: {\"status\":\"completed\"}\n\n",
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await streamResume({
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+      approvalId: "approval-1",
+      approved: false,
+      reason: "needs tests",
+    }, () => undefined, { signal });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/agent/chat/resume");
+    expect(init.signal).toBe(signal);
+    expect(JSON.parse(init.body as string)).toEqual({
+      session_id: "session-1",
+      workspace_id: "workspace-1",
+      approval_id: "approval-1",
+      approved: false,
+      reason: "needs tests",
+    });
   });
 });

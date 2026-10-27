@@ -40,8 +40,19 @@ public class PythonAgentClient {
      * 将聊天请求转发给 Python Agent，并按收到顺序透传 SSE 事件。
      */
     public Flux<ServerSentEvent<String>> streamChat(AgentChatRequest request) {
+        return stream("/chat", request);
+    }
+
+    /**
+     * 将一次批准或拒绝转发给 Python Agent，并继续透传同一 SSE 事件协议。
+     */
+    public Flux<ServerSentEvent<String>> streamResume(AgentResumeRequest request) {
+        return stream("/chat/resume", request);
+    }
+
+    private Flux<ServerSentEvent<String>> stream(String uri, Object request) {
         return webClient.post()
-                .uri("/chat")
+                .uri(uri)
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.TEXT_EVENT_STREAM)
                 .bodyValue(request)

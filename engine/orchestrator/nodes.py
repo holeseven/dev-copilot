@@ -33,6 +33,7 @@ from engine.core.hitl.interrupt_gate import (
     require_approval,
 )
 from engine.core.memory.memory_retriever import MemoryRetriever
+from engine.core.mcp.approval import ToolApprovalRequest
 from engine.core.mcp.manager import MCPManager
 from engine.infra.llm_client import Complexity, get_llm_by_complexity
 
@@ -260,9 +261,11 @@ async def tool_node(
     tool_results = []
     normalized_calls = _validated_tool_calls(last_msg.tool_calls)
     rejected_ids: set[str] = set()
+    approval_requests: dict[str, ToolApprovalRequest] = {}
+    preparation_errors: set[str] = set()
 
-    # Complete every approval before starting any tool. A later interrupt replays
-    # this node, so executing earlier calls here would duplicate their side effects.
+    # Prepare every sensitive operation without side effects. Sensitive providers
+    # must issue the descriptor; caller-supplied paths/diffs are never trusted.
     for tool_call in normalized_calls:
         tool_name = tool_call["name"]
         tool_args = tool_call["args"]
@@ -270,10 +273,47 @@ async def tool_node(
         if not is_sensitive(tool_name):
             continue
         try:
+            descriptor = (
+                await mcp_manager.prepare_approval(tool_name, tool_args)
+                if mcp_manager is not None
+                else None
+            )
+            if descriptor is None:
+                preparation_errors.add(tool_id)
+                continue
+            descriptor_payload = dict(descriptor.payload)
+            expected_workspace = configurable.get("workspace_id")
+            if (
+                descriptor.action != tool_name
+                or not is_sensitive(descriptor.action)
+                or descriptor_payload.get("tool_name") != tool_name
+                or (
+                    expected_workspace is not None
+                    and descriptor_payload.get("workspace_id") != expected_workspace
+                )
+            ):
+                preparation_errors.add(tool_id)
+                continue
+            approval_requests[tool_id] = descriptor
+        except Exception:
+            preparation_errors.add(tool_id)
+            logger.opt(exception=True).warning(
+                "敏感工具准备失败 | tool={} | call_id={}", tool_name, tool_id
+            )
+
+    # Complete every approval before starting any tool. A later interrupt replays
+    # this node, so executing earlier calls here would duplicate their side effects.
+    for tool_call in normalized_calls:
+        tool_name = tool_call["name"]
+        tool_id = tool_call["id"]
+        descriptor = approval_requests.get(tool_id)
+        if descriptor is None:
+            continue
+        try:
             require_approval(
-                action=tool_name,
-                payload={"tool_name": tool_name, "arguments": tool_args},
-                approval_id=tool_id,
+                action=descriptor.action,
+                payload=dict(descriptor.payload),
+                approval_id=descriptor.approval_id,
             )
         except ApprovalRejectedError:
             rejected_ids.add(tool_id)
@@ -284,6 +324,23 @@ async def tool_node(
         tool_id = tool_call["id"]
 
         logger.info("执行工具 | tool={} | call_id={}", tool_name, tool_id)
+
+        if tool_id in preparation_errors:
+            messages.append(
+                ToolMessage(
+                    content="[ERROR] Sensitive tool preparation failed.",
+                    tool_call_id=tool_id,
+                )
+            )
+            tool_results.append(
+                {
+                    "tool": tool_name,
+                    "tool_call_id": tool_id,
+                    "status": "error",
+                    "code": "approval_preparation_failed",
+                }
+            )
+            continue
 
         if tool_id in rejected_ids:
             messages.append(
@@ -315,10 +372,19 @@ async def tool_node(
                 {"status": "start", "tool_name": tool_name, "tool_call_id": tool_id},
                 config=config,
             )
-            result = await mcp_manager.call_tool(tool_name, tool_args)
-            result_content = str(result) if result is not None else "执行成功（无返回值）"
+            descriptor = approval_requests.get(tool_id)
+            if descriptor is None:
+                result = await mcp_manager.call_tool(tool_name, tool_args)
+            else:
+                result = await mcp_manager.call_tool(
+                    tool_name,
+                    tool_args,
+                    approval_id=descriptor.approval_id,
+                )
+            result_content = _tool_result_content(result)
             tool_msg = ToolMessage(content=result_content, tool_call_id=tool_id)
             messages.append(tool_msg)
+            await _dispatch_controlled_change_events(result, tool_id, config)
             if isinstance(result, str) and result.startswith("[ERROR]"):
                 await adispatch_custom_event(
                     "tool_status",
@@ -359,6 +425,35 @@ async def tool_node(
         "messages": messages,
         "tool_results": tool_results,
     }
+
+
+def _tool_result_content(result: Any) -> str:
+    if result is None:
+        return "执行成功（无返回值）"
+    if isinstance(result, (dict, list)):
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
+    return str(result)
+
+
+async def _dispatch_controlled_change_events(
+    result: Any, tool_call_id: str, config: RunnableConfig
+) -> None:
+    if not isinstance(result, dict):
+        return
+    mutation = result.get("mutation")
+    if isinstance(mutation, dict):
+        await adispatch_custom_event(
+            "file_change",
+            {"tool_call_id": tool_call_id, **mutation},
+            config=config,
+        )
+    validation = result.get("validation")
+    if isinstance(validation, dict):
+        await adispatch_custom_event(
+            "verification",
+            {"tool_call_id": tool_call_id, **validation},
+            config=config,
+        )
 
 
 def _normalize_tool_calls(tool_calls: list, *, session_id: str) -> list[dict[str, Any]]:

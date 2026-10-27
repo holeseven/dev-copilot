@@ -28,6 +28,7 @@ from loguru import logger
 SENSITIVE_ACTIONS: Set[str] = {
     "edit_file",
     "write_file",
+    "apply_workspace_change",
     "git_commit",
     "run_command",
     "delete_file",

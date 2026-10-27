@@ -1,6 +1,7 @@
 package com.agent.controller;
 
 import com.agent.client.AgentChatRequest;
+import com.agent.client.AgentResumeRequest;
 import com.agent.client.PythonAgentClient;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
@@ -32,7 +33,20 @@ public class AgentChatController {
             produces = MediaType.TEXT_EVENT_STREAM_VALUE
     )
     public Flux<ServerSentEvent<String>> chat(@Valid @RequestBody AgentChatRequest request) {
-        return pythonAgentClient.streamChat(request).switchOnFirst((first, stream) -> {
+        return safelyStream(pythonAgentClient.streamChat(request));
+    }
+
+    @PostMapping(
+            value = "/chat/resume",
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.TEXT_EVENT_STREAM_VALUE
+    )
+    public Flux<ServerSentEvent<String>> resume(@Valid @RequestBody AgentResumeRequest request) {
+        return safelyStream(pythonAgentClient.streamResume(request));
+    }
+
+    private Flux<ServerSentEvent<String>> safelyStream(Flux<ServerSentEvent<String>> upstream) {
+        return upstream.switchOnFirst((first, stream) -> {
             if (first.isOnError()) {
                 return Flux.error(first.getThrowable());
             }

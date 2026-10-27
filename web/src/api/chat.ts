@@ -7,6 +7,14 @@ export interface ChatRequest {
   workspaceId: string;
 }
 
+export interface ResumeRequest {
+  sessionId: string;
+  workspaceId: string;
+  approvalId: string;
+  approved: boolean;
+  reason?: string;
+}
+
 export interface StreamChatOptions {
   signal?: AbortSignal;
 }
@@ -20,17 +28,40 @@ export async function streamChat(
   onEvent: ChatEventHandler,
   options: StreamChatOptions = {},
 ): Promise<void> {
-  const response = await fetch("/api/v1/agent/chat", {
+  return streamAgentRequest("/api/v1/agent/chat", {
+    message: request.message,
+    session_id: request.sessionId,
+    workspace_id: request.workspaceId,
+  }, onEvent, options);
+}
+
+export async function streamResume(
+  request: ResumeRequest,
+  onEvent: ChatEventHandler,
+  options: StreamChatOptions = {},
+): Promise<void> {
+  return streamAgentRequest("/api/v1/agent/chat/resume", {
+    session_id: request.sessionId,
+    workspace_id: request.workspaceId,
+    approval_id: request.approvalId,
+    approved: request.approved,
+    reason: request.reason,
+  }, onEvent, options);
+}
+
+async function streamAgentRequest(
+  url: string,
+  body: Record<string, unknown>,
+  onEvent: ChatEventHandler,
+  options: StreamChatOptions,
+): Promise<void> {
+  const response = await fetch(url, {
     method: "POST",
     headers: {
       Accept: "text/event-stream",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      message: request.message,
-      session_id: request.sessionId,
-      workspace_id: request.workspaceId,
-    }),
+    body: JSON.stringify(body),
     signal: options.signal,
   });
 

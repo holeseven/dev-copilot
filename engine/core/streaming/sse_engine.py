@@ -76,7 +76,13 @@ async def sse_event_generator(
                 })
 
             elif kind == "on_custom_event" and name == "tool_status":
-                yield _sse_line("tool", _safe_serialize(data))
+                yield _sse_line("tool", _safe_tool_status(data))
+
+            elif kind == "on_custom_event" and name == "file_change":
+                yield _sse_line("file_change", _safe_file_change(data))
+
+            elif kind == "on_custom_event" and name == "verification":
+                yield _sse_line("verification", _safe_verification(data))
 
             # ── 检测 __interrupt 信息（LangGraph v2 interrupt 事件）──
             elif kind == "on_chain_stream":
@@ -160,3 +166,45 @@ def _safe_serialize(obj: Any) -> Any:
         return obj
     except (TypeError, ValueError):
         return str(obj)
+
+
+def _safe_fields(data: Any, fields: set[str]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    return {
+        key: _safe_serialize(value)
+        for key, value in data.items()
+        if key in fields
+    }
+
+
+def _safe_tool_status(data: Any) -> Dict[str, Any]:
+    return _safe_fields(data, {"status", "tool_name", "tool_call_id"})
+
+
+def _safe_file_change(data: Any) -> Dict[str, Any]:
+    return _safe_fields(
+        data,
+        {
+            "tool_call_id",
+            "proposal_id",
+            "workspace_id",
+            "virtual_path",
+            "operation",
+            "before_sha256",
+            "after_sha256",
+        },
+    )
+
+
+def _safe_verification(data: Any) -> Dict[str, Any]:
+    return _safe_fields(
+        data,
+        {
+            "tool_call_id",
+            "profile",
+            "status",
+            "exit_code",
+            "truncated",
+        },
+    )

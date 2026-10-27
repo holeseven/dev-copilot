@@ -127,6 +127,30 @@ class WorkspaceMutator:
         )
 
     def apply(self, proposal: MutationProposal) -> MutationResult:
+        self.validate(proposal)
+
+        guarded, relative = self._repository_for_path(proposal.virtual_path)
+        target = self._resolve_write_target(
+            guarded, relative, must_exist=proposal.operation == "replace"
+        )
+        self._atomic_write(
+            guarded.root,
+            target,
+            proposal.new_content,
+            proposal.before_sha256,
+        )
+        self._consumed.add(proposal.approval_id)
+        return MutationResult(
+            approval_id=proposal.approval_id,
+            workspace_id=proposal.workspace_id,
+            virtual_path=proposal.virtual_path,
+            operation=proposal.operation,
+            before_sha256=proposal.before_sha256,
+            after_sha256=proposal.after_sha256,
+        )
+
+    def validate(self, proposal: MutationProposal) -> None:
+        """Validate an issued proposal without writing or consuming it."""
         if proposal.workspace_id != self.workspace.id:
             raise MutationValidationError("proposal belongs to a different workspace")
         if proposal.approval_id in self._consumed:
@@ -150,21 +174,10 @@ class WorkspaceMutator:
             guarded, relative, must_exist=must_exist
         )
         self._assert_expected_state(target, proposal.before_sha256)
-        self._atomic_write(
-            guarded.root,
-            target,
-            proposal.new_content,
-            proposal.before_sha256,
-        )
-        self._consumed.add(proposal.approval_id)
-        return MutationResult(
-            approval_id=proposal.approval_id,
-            workspace_id=proposal.workspace_id,
-            virtual_path=proposal.virtual_path,
-            operation=proposal.operation,
-            before_sha256=proposal.before_sha256,
-            after_sha256=proposal.after_sha256,
-        )
+
+    def discard(self, approval_id: str) -> None:
+        """Forget an unneeded issued proposal while preserving consumed history."""
+        self._issued.pop(approval_id, None)
 
     def _proposal(
         self,

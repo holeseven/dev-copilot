@@ -91,6 +91,33 @@ class PythonAgentClientTest {
     }
 
     @Test
+    void postsResumeRequestWithOnlyTheApprovalContractFields() throws Exception {
+        AtomicReference<String> path = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        startServer("/chat/resume", exchange -> {
+            path.set(exchange.getRequestURI().getPath());
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            send(exchange, 200, MediaType.TEXT_EVENT_STREAM_VALUE, """
+                    event: done
+                    data: {"status":"completed"}
+
+                    """);
+        });
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        List<ServerSentEvent<String>> events = client.streamResume(
+                        new AgentResumeRequest("session-1", "workspace-1", "approval-1", true, "reviewed"))
+                .collectList()
+                .block(Duration.ofSeconds(3));
+
+        assertThat(path.get()).isEqualTo("/chat/resume");
+        assertThat(objectMapper.readTree(body.get())).isEqualTo(objectMapper.readTree("""
+                {"session_id":"session-1","workspace_id":"workspace-1","approval_id":"approval-1","approved":true,"reason":"reviewed"}
+                """));
+        assertThat(events).extracting(ServerSentEvent::event).containsExactly("done");
+    }
+
+    @Test
     void mapsUpstreamHttpErrorToGatewayException() throws Exception {
         startServer(exchange -> send(exchange, 422, MediaType.APPLICATION_JSON_VALUE,
                 "{\"detail\":\"workspace missing\"}"));
@@ -147,8 +174,12 @@ class PythonAgentClientTest {
     }
 
     private void startServer(ExchangeHandler handler) throws IOException {
+        startServer("/chat", handler);
+    }
+
+    private void startServer(String path, ExchangeHandler handler) throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/chat", exchange -> {
+        server.createContext(path, exchange -> {
             try {
                 handler.handle(exchange);
             } finally {

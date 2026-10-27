@@ -8,7 +8,9 @@ ToolProvider —— 工具提供者抽象与实现
 """
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from engine.core.mcp.approval import ToolApprovalRequest
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,23 @@ class ToolProvider(ABC):
             Exception: 调用失败时抛出。
         """
         ...
+
+    async def prepare_approval(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Optional[ToolApprovalRequest]:
+        """Prepare a sensitive call without performing a side effect."""
+
+        return None
+
+    async def call_approved_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        approval_id: str,
+    ) -> Any:
+        """Execute a prepared call. Providers must opt in explicitly."""
+
+        raise PermissionError("provider does not support approved tool execution")
 
 
 # ──────────────────────────── Mock 实现 ────────────────────────────

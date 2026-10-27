@@ -81,13 +81,9 @@ class SafeTestRunner:
         self.max_output_bytes = max_output_bytes
 
     async def run(self, profile: str) -> dict:
+        self.validate_profile(profile)
         selected = _PROFILES.get(profile)
-        if selected is None:
-            raise ValueError("unsupported test profile")
-        try:
-            self.repository.resolve(selected.marker, kind="file", must_exist=True)
-        except WorkspacePathError as exc:
-            raise ValueError("required project marker is missing") from exc
+        assert selected is not None
 
         options = {
             "cwd": str(self.repository.root),
@@ -276,6 +272,17 @@ class SafeTestRunner:
         }
         environment.update({"CI": "true", "NO_COLOR": "1", "PYTHONUNBUFFERED": "1"})
         return environment
+
+    def validate_profile(self, profile: str) -> None:
+        """Validate the fixed profile, marker, and external runtime without running it."""
+        selected = _PROFILES.get(profile)
+        if selected is None:
+            raise ValueError("unsupported test profile")
+        try:
+            self.repository.resolve(selected.marker, kind="file", must_exist=True)
+        except WorkspacePathError as exc:
+            raise ValueError("required project marker is missing") from exc
+        self._resolve_executable(selected.executable)
 
     @staticmethod
     async def _cancel_readers(*tasks: asyncio.Task) -> None:

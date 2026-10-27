@@ -3,10 +3,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { streamChat } from "./api/chat";
+import { streamChat, streamResume } from "./api/chat";
 import { listWorkspaces } from "./api/workspaces";
 
-vi.mock("./api/chat", () => ({ streamChat: vi.fn() }));
+vi.mock("./api/chat", () => ({ streamChat: vi.fn(), streamResume: vi.fn() }));
 vi.mock("./api/workspaces", () => ({
   listWorkspaces: vi.fn(),
   createWorkspace: vi.fn(),
@@ -136,5 +136,146 @@ describe("小瑶开发助手工作台", () => {
     expect(screen.getAllByText("read_file")).toHaveLength(1);
     expect(screen.getByText("已完成")).toBeInTheDocument();
     expect(screen.getByText("需要处理")).toBeInTheDocument();
+  });
+
+  it("renders an inline diff approval and resumes it through the shared event handler", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-1",
+        action: "write_file",
+        message: "准备更新登录校验",
+        payload: {
+          repository: "backend",
+          virtual_path: "src/auth.py",
+          operation: "replace",
+          diff: "@@ -1 +1 @@\n-old\n+new",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "message", data: { token: "修改已经应用" } });
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+
+    fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+      target: { value: "修复登录" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+
+    expect(await screen.findByRole("heading", { name: "小瑶准备修改代码" })).toBeInTheDocument();
+    expect(screen.getByText("src/auth.py")).toBeInTheDocument();
+    expect(screen.getByText("+new", { exact: false })).toBeInTheDocument();
+    expect(screen.getByText("等待主人确认")).toBeInTheDocument();
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "批准并执行" }));
+
+    await waitFor(() => expect(streamResume).toHaveBeenCalledOnce());
+    expect(vi.mocked(streamResume).mock.calls[0][0]).toMatchObject({
+      sessionId: vi.mocked(streamChat).mock.calls[0][0].sessionId,
+      workspaceId: "local-dev",
+      approvalId: "approval-1",
+      approved: true,
+    });
+    expect(await screen.findByText("修改已经应用")).toBeInTheDocument();
+    expect(screen.getByText("本轮完成")).toBeInTheDocument();
+  });
+
+  it("submits an optional rejection reason only once", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-2", action: "write_file", message: "修改配置", payload: {},
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockReturnValue(new Promise(() => undefined));
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+      target: { value: "修改配置" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    await screen.findByRole("button", { name: "拒绝修改" });
+
+    fireEvent.click(screen.getByRole("button", { name: "拒绝修改" }));
+    fireEvent.change(screen.getByLabelText("拒绝原因（可选）"), {
+      target: { value: "需要先补测试" },
+    });
+    const confirm = screen.getByRole("button", { name: "确认拒绝" });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(streamResume).toHaveBeenCalledOnce());
+    expect(vi.mocked(streamResume).mock.calls[0][0]).toMatchObject({
+      approvalId: "approval-2",
+      approved: false,
+      reason: "需要先补测试",
+    });
+    expect(screen.getByText("正在恢复任务…")).toBeInTheDocument();
+  });
+
+  it("merges concurrent tool events by tool_call_id instead of tool name", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "tool", data: { status: "start", tool_name: "read_file", tool_call_id: "a" } });
+      await onEvent({ event: "tool", data: { status: "start", tool_name: "read_file", tool_call_id: "b" } });
+      await onEvent({ event: "tool", data: { status: "end", tool_name: "read_file", tool_call_id: "a" } });
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+      target: { value: "并发读取" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+
+    await waitFor(() => expect(screen.getAllByText("read_file")).toHaveLength(2));
+    expect(screen.getAllByText("已完成")).toHaveLength(1);
+    expect(screen.getAllByText("执行中")).toHaveLength(1);
+  });
+
+  it("stores file changes and verification results and clears them on workspace switch", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace,
+      { id: "other", name: "另一个项目", repositories: [] },
+    ]);
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "file_change", data: {
+        tool_call_id: "tool-1",
+        proposal_id: "proposal-1",
+        workspace_id: "local-dev",
+        virtual_path: "src/main.py",
+        operation: "replace",
+        before_sha256: "aaaaaaaaaaaaaaaa",
+        after_sha256: "bbbbbbbbbbbbbbbb",
+      } });
+      await onEvent({ event: "verification", data: {
+        tool_call_id: "tool-1",
+        profile: "python_pytest",
+        status: "passed",
+        exit_code: 0,
+        stdout: "1 passed",
+        stderr: "",
+        truncated: false,
+      } });
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+      target: { value: "修改并验证" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+
+    expect(await screen.findByText("src/main.py")).toBeInTheDocument();
+    expect(screen.getByText("验证通过")).toBeInTheDocument();
+    expect(screen.getByText("python_pytest")).toBeInTheDocument();
+    expect(screen.queryByText("1 passed")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /另一个项目/ }));
+    await waitFor(() => expect(screen.queryByText("src/main.py")).not.toBeInTheDocument());
+    expect(screen.queryByText("验证通过")).not.toBeInTheDocument();
   });
 });

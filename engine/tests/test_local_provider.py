@@ -38,18 +38,75 @@ def _provider(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_local_provider_exposes_only_read_only_tools_with_matching_parameters(tmp_path):
+async def test_local_provider_exposes_read_tools_and_controlled_change_tools(tmp_path):
     provider = _provider(tmp_path)
 
     schemas = await provider.list_tools()
 
     assert [schema["name"] for schema in schemas] == [
-        "list_dir", "find_files", "grep_code", "read_file", "code_search"
+        "list_dir",
+        "find_files",
+        "grep_code",
+        "read_file",
+        "code_search",
+        "preview_edit_file",
+        "preview_create_file",
+        "apply_workspace_change",
     ]
     assert "workspace_id" not in str(schemas)
     assert "write_file" not in str(schemas)
+    assert "run_command" not in str(schemas)
     assert set(schemas[0]["parameters"]["properties"]) == {"path"}
     assert set(schemas[1]["parameters"]["properties"]) == {"glob_pattern", "path"}
+    assert all(schema["parameters"]["additionalProperties"] is False for schema in schemas)
+
+
+@pytest.mark.asyncio
+async def test_controlled_change_requires_approved_provider_path(tmp_path):
+    class ChangeService:
+        def preview_replace(self, path, old_text, new_text, profile):
+            return {"status": "previewed", "proposal_id": "proposal-1"}
+
+        def approval_request(self, proposal_id, patch_sha256):
+            return type(
+                "Request",
+                (),
+                {
+                    "approval_id": proposal_id,
+                    "action": "apply_workspace_change",
+                    "payload": {
+                        "tool_name": "apply_workspace_change",
+                        "virtual_path": "api/main.py",
+                        "diff": "safe diff",
+                        "patch_sha256": patch_sha256,
+                    },
+                },
+            )()
+
+        async def apply_approved(self, proposal_id, patch_sha256, approval_id):
+            assert approval_id == proposal_id
+            return {"status": "applied_and_tests_passed"}
+
+    provider = LocalDevToolProvider(
+        "local",
+        _workspace(tmp_path),
+        path_guard=WorkspacePathGuard.from_roots((tmp_path,)),
+        change_service=ChangeService(),
+    )
+    arguments = {"proposal_id": "proposal-1", "patch_sha256": "hash-1"}
+
+    with pytest.raises(PermissionError, match="approved"):
+        await provider.call_tool("apply_workspace_change", arguments)
+    approval = await provider.prepare_approval("apply_workspace_change", arguments)
+    result = await provider.call_approved_tool(
+        "apply_workspace_change", arguments, approval.approval_id
+    )
+
+    assert approval.approval_id == "proposal-1"
+    assert set(approval.payload) == {
+        "tool_name", "virtual_path", "diff", "patch_sha256"
+    }
+    assert result == {"status": "applied_and_tests_passed"}
 
 
 @pytest.mark.asyncio

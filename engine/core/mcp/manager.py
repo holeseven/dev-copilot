@@ -11,6 +11,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from engine.core.mcp.registry import ToolRegistry
+from engine.core.mcp.approval import ToolApprovalRequest
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,24 @@ class MCPManager:
 
     # ═══════════════════ L2: 调用 + 重试 ═══════════════════
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def prepare_approval(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Optional[ToolApprovalRequest]:
+        """Ask the owning provider for a read-only, server-issued approval."""
+
+        tool_entry = self.registry.get(tool_name)
+        provider = tool_entry.get("provider") if tool_entry else None
+        if provider is None:
+            return None
+        return await provider.prepare_approval(tool_name, arguments)
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        *,
+        approval_id: Optional[str] = None,
+    ) -> Any:
         """
         调用工具，失败自动重试 3 次（退避 5/10/15s）。
         最终仍失败则将错误信息作为结果返回（供 LLM 决策）。
@@ -149,6 +167,14 @@ class MCPManager:
         provider = tool_entry.get("provider")
         if provider is None:
             return f"[ERROR] 工具 '{tool_name}' 无可用 provider"
+        if approval_id is not None:
+            try:
+                return await provider.call_approved_tool(
+                    tool_name, arguments, approval_id
+                )
+            except Exception:
+                logger.exception("approved tool execution failed: %s", tool_name)
+                return "[ERROR] approved tool execution failed"
         if not getattr(provider, "retry_on_error", True):
             try:
                 return await provider.call_tool(tool_name, arguments)

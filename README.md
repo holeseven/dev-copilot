@@ -2,7 +2,7 @@
 
 # 小瑶开发助手（Dev Copilot）
 
-> 面向本地代码库的开发助手 Alpha：用 Workspace 管理多个仓库，通过 LangGraph 调用只读代码工具，并以 SSE 流式返回结果。
+> 面向本地代码库的开发助手 Alpha：用 Workspace 管理多个仓库，通过 LangGraph 分析代码，并在主人确认 Diff 后受控修改和验证项目。
 
 ## 当前状态
 
@@ -11,15 +11,16 @@
 - 创建、查询、激活和删除 Workspace，并持久化本地注册元数据；
 - 在一个 Workspace 中注册多个仓库，扫描语言、构建系统、服务、中间件、显式依赖和 Git 信息；
 - 按 Workspace 隔离 `list_dir`、`find_files`、`grep_code`、`read_file`、`code_search` 五个只读工具；
+- 通过 `preview_edit_file` / `preview_create_file` 生成单文件 UTF-8 变更提案，在执行 `apply_workspace_change` 前展示服务端生成的 Diff 并等待逐项批准；批准后原子写入，并按固定白名单运行 `pytest`、`mvn test` 或 `npm test`；
 - LangGraph 模型/工具循环和 SSE token、工具状态事件；
 - FastAPI 提供的单文件薄工作台，可在 Python 本地开发模式下切换 Workspace、注册仓库、扫描和发起只读问答；
 - Java 提供版本化的统一聊天 SSE 与 Workspace API，并在容器模式中作为唯一公开业务入口；
-- Java 到 Python 的 SSE 代理保留消息、工具和审批事件，区分连接前 HTTP 错误与流中失败，并向上游传播取消。
-- React 产品工作台“**小瑶开发助手**”：管理本地 Workspace、扫描项目、流式对话、查看工具施工记录，并可随时停止当前任务；页面只调用 Java `/api/v1`。
+- Java 到 Python 的 SSE 代理保留消息、工具、审批、文件变更和验证事件，支持 `/api/v1/agent/chat/resume` 恢复审批中的任务，区分连接前 HTTP 错误与流中失败，并向上游传播取消；
+- React 产品工作台“**小瑶开发助手**”：管理本地 Workspace、扫描项目、流式对话、查看工具施工记录，在内联 Diff 卡片中批准或拒绝单次修改，并展示写入和自动测试结果；页面只调用 Java `/api/v1`。
 
 下列能力仍在开发中，请不要把现有占位模块视为可用功能：
 
-- 可恢复、可审计的 HITL 受控代码修改闭环；
+- 可跨进程重启和多实例恢复的持久化 checkpoint，以及长期审计记录；
 - Workspace RAG 索引、增量更新与来源引用；
 - 面向多人或公网部署的认证、授权和租户隔离。
 
@@ -35,7 +36,7 @@ Java Spring Boot ───────────── MySQL / Redis
        │ 内部 REST / SSE
        ▼
 Python FastAPI + LangGraph ── Workspace Registry / Scanner
-       │                    └─ 每个 Workspace 独立的只读工具运行时
+       │                    └─ Workspace 隔离的读取、变更提案、审批写入与测试运行时
        └─ Redis（动态配置与现有基础设施）
 ```
 
@@ -45,6 +46,8 @@ Python FastAPI + LangGraph ── Workspace Registry / Scanner
 - Redis 与 MySQL 只加入 Compose 内部网络，不发布宿主端口。
 - `DEV_COPILOT_ALLOWED_ROOT` 以只读方式挂载为容器内 `/workspace`；注册表等可写元数据保存在独立 `engine-metadata` volume。
 - 仓库注册路径可以是绝对宿主机/容器路径，但必须位于明确的允许根目录内。注册后，只读工具仅接受仓库内的虚拟相对路径，并拒绝绝对路径、盘符/UNC 路径、`..` 越界、损坏链接，以及通过 symlink/junction（Windows reparse point）逃逸；无法检查或解析时 fail closed。
+- 本地进程模式下，代码修改采用“预览提案 → 展示 Diff → 单次人工批准 → 原子写入 → 固定测试配置验证”的闭环；提案绑定 Workspace、目标文件内容哈希和审批 ID，目标在批准前发生变化时会拒绝写入。测试命令及参数由服务端白名单确定，不接受模型提供任意 shell 命令。
+- 当前 checkpoint 使用进程内 `InMemorySaver`。审批可以跨 HTTP 请求恢复，但 Engine 重启后会丢失，尚不支持多实例共享恢复；这不是持久化审计系统。
 - 当前没有用户认证。允许根目录应尽量小，不要挂载整个用户目录、磁盘根目录或敏感凭据目录。
 
 ## Docker Compose 快速启动
@@ -71,6 +74,8 @@ docker compose up -d --build
 ```
 
 启动完成后打开“小瑶开发助手”：<http://127.0.0.1:3000>。前端容器只代理版本化的 `/api/v1` 到 Java；Java API 仍可在 <http://127.0.0.1:8081/api/v1> 直接访问。两个入口都只绑定宿主机 loopback。Python Engine 不发布宿主端口，只接受容器间调用，同时保留访问外部模型 API 的网络出口。
+
+安全 Compose 当前把 `/workspace` 挂载为只读，因此容器模式可完成项目登记、扫描、代码分析和对话，但不能实际写入受控变更。需要体验修改闭环时，请使用下面的本地进程开发模式，并只把确实允许修改的代码目录加入 `WORKSPACE_ALLOWED_ROOTS`。
 
 在 Docker 模式注册仓库时必须使用**容器路径**。若宿主目录 `${DEV_COPILOT_ALLOWED_ROOT}` 下有 `order-service`，请求应为：
 
@@ -114,6 +119,10 @@ uv run --project engine --frozen uvicorn engine.main:app --reload --host 127.0.0
 本地模式注册仓库时使用真实宿主路径，而不是 `/workspace`：
 
 ```bash
+curl -X POST http://127.0.0.1:8000/workspaces \
+  -H "Content-Type: application/json" \
+  -d '{"id":"local-dev","name":"Local Dev"}'
+
 curl -X POST http://127.0.0.1:8000/workspaces/local-dev/repositories \
   -H "Content-Type: application/json" \
   -d '{"name":"order-service","local_path":"/absolute/path/to/code/order-service"}'
@@ -134,7 +143,7 @@ npm --prefix web run dev
 
 点击“添加 Workspace”可登记本地项目。浏览器目录选择器受安全模型限制，不能把绝对路径交给后端，因此页面只用它辅助填写仓库名称；仍需填写 **Java/Python 服务实际可访问的绝对路径**。Docker 模式下应填写 `/workspace/...`，本地进程模式下填写宿主机真实路径。源码不会被浏览器上传。
 
-运行完整验证（Python、前端 Node 脚本和 Java 单元测试会按顺序执行，任一失败即停止）：
+本地前端要求 Node.js `20.19.x`。运行完整验证（Python、旧前端流测试、React 测试与构建、前端架构测试和 Java 单元测试会按顺序执行，任一失败即停止）：
 
 ```bash
 uv run --project engine --frozen --extra dev python scripts/verify.py
@@ -169,8 +178,10 @@ dev-copilot/
 ├── .env.example              # 无凭据的环境变量模板
 ├── engine/                   # Python FastAPI / LangGraph Agent 引擎
 │   ├── api/                  # chat、tasks、tools、workspaces 路由
-│   ├── core/workspace/       # Registry、PathGuard、Scanner
-│   ├── core/mcp/             # Workspace 隔离的只读工具运行时
+│   ├── core/workspace/       # Registry、PathGuard、Scanner、受控变更服务
+│   ├── core/mcp/             # Workspace 隔离的读取、变更提案和审批工具
+│   ├── core/execution/       # 固定白名单测试配置与受限进程执行
+│   ├── core/hitl/            # LangGraph 人工审批门控
 │   ├── orchestrator/         # 当前接入主链路的 LangGraph 图和节点
 │   ├── frontend/index.html   # 当前单文件薄工作台
 │   └── tests/
@@ -178,13 +189,14 @@ dev-copilot/
 └── web/                      # React 19 / TypeScript / Vite 产品工作台
 ```
 
-`engine/core/hitl`、`engine/core/rag`、`engine/core/openspec`、`engine/core/orchestrator` 和部分 `agents` 文件是实验或演进中的模块，目前未形成完整产品主链路。
+`engine/core/rag`、`engine/core/openspec`、`engine/core/orchestrator` 和部分 `agents` 文件是实验或演进中的模块，目前未形成完整产品主链路。
 
 ## API 使用提示
 
 - 公开 Workspace 接口位于 Java `/api/v1/workspaces`；创建、查询、删除、注册仓库、扫描和激活操作由 Java 转发到内部 Python Engine。
-- `POST /api/v1/agent/chat` 必须提供 `message`、`session_id` 和 `workspace_id`，通过 SSE 返回消息、工具状态和审批事件。
-- Python 的 `/chat/resume` 仍只是内部接口骨架；当前图没有持久化 checkpointer，不能视为可靠的跨请求 HITL 恢复能力。
+- `POST /api/v1/agent/chat` 必须提供 `message`、`session_id` 和 `workspace_id`，通过 SSE 返回消息、工具状态、审批、文件变更和验证事件。
+- 收到 `approval_required` 后，使用相同的 `session_id`、`workspace_id` 和服务端签发的 `approval_id` 调用 `POST /api/v1/agent/chat/resume`，传入 `approved` 及可选的 `reason`。批准只对应当前一项 Diff；拒绝不会写入该变更。
+- 恢复能力当前依赖 Python Engine 进程内的 `InMemorySaver`，只保证同一运行中跨请求恢复；Engine 重启或切换实例后不能继续原审批。
 
 ## License
 

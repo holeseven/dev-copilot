@@ -190,6 +190,9 @@ async def test_graph_runs_real_read_file_loop_across_two_repositories(tmp_path, 
         "grep_code",
         "read_file",
         "code_search",
+        "preview_edit_file",
+        "preview_create_file",
+        "apply_workspace_change",
     ]
     assert llm.calls == 2
     assert sum(isinstance(message, ToolMessage) for message in result["messages"]) == 2

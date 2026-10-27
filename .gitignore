@@ -12,6 +12,8 @@ env/
 .mypy_cache/
 .ruff_cache/
 .superpowers/
+/agent/
+/docs/internal/
 
 # ===== Java =====
 target/

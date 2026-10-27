@@ -1,8 +1,15 @@
 // @author lxy
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { streamChat } from "./api/chat";
+import { streamChat, streamResume } from "./api/chat";
 import type { AgentEvent } from "./api/sse";
+import { ApprovalCard, type Approval } from "./components/ApprovalCard";
+import {
+  FileChangeCard,
+  VerificationCard,
+  type FileChange,
+  type VerificationResult,
+} from "./components/ExecutionResults";
 import {
   activateWorkspace,
   addRepository,
@@ -13,10 +20,10 @@ import {
   type Workspace,
 } from "./api/workspaces";
 
-type RunStatus = "idle" | "connecting" | "streaming" | "completed" | "failed" | "cancelled";
+type RunStatus = "idle" | "connecting" | "streaming" | "awaiting_approval" | "resuming" | "completed" | "failed" | "cancelled";
 type Message = { id: string; role: "user" | "assistant"; content: string };
 type ToolActivity = { id: string; name: string; status: string };
-type TerminalStatus = "completed" | "failed";
+type TerminalStatus = "completed" | "failed" | "awaiting_approval";
 type ScanSummary = {
   repository?: string;
   languages?: string[];
@@ -39,7 +46,9 @@ export function App() {
   const [scan, setScan] = useState<ScanSummary[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [tools, setTools] = useState<ToolActivity[]>([]);
-  const [approvals, setApprovals] = useState<string[]>([]);
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
+  const [verifications, setVerifications] = useState<VerificationResult[]>([]);
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState<RunStatus>("idle");
   const [notice, setNotice] = useState("");
@@ -50,6 +59,7 @@ export function App() {
     status: null,
   });
   const sessionIdsRef = useRef(new Map<string, string>());
+  const approvalSubmissionsRef = useRef(new Set<string>());
   const compactLayout = useMediaQuery("(max-width: 900px)");
 
   const selectedWorkspace = useMemo(
@@ -87,6 +97,9 @@ export function App() {
     setTools([]);
     setScan([]);
     setApprovals([]);
+    setFileChanges([]);
+    setVerifications([]);
+    setStatus("idle");
     try {
       await activateWorkspace(nextId);
       setNotice("");
@@ -123,7 +136,7 @@ export function App() {
 
   async function sendMessage(message = draft) {
     const trimmed = message.trim();
-    if (!trimmed || !workspaceId || status === "connecting" || status === "streaming") return;
+    if (!trimmed || !workspaceId || isRunLocked(status)) return;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -140,6 +153,8 @@ export function App() {
     setDraft("");
     setTools([]);
     setApprovals([]);
+    setFileChanges([]);
+    setVerifications([]);
     setNotice("");
     setStatus("connecting");
 
@@ -181,19 +196,104 @@ export function App() {
     } else if (event.event === "tool") {
       setStatus("streaming");
       const name = typeof data.tool_name === "string" ? data.tool_name : "开发工具";
+      const callId = typeof data.tool_call_id === "string" ? data.tool_call_id : undefined;
       const toolStatus = typeof data.status === "string" ? data.status : "start";
-      setTools((items) => updateToolActivity(items, name, toolStatus));
+      setTools((items) => updateToolActivity(items, name, toolStatus, callId));
+    } else if (event.event === "file_change") {
+      const proposalId = stringValue(data.proposal_id) ?? stringValue(data.tool_call_id) ?? makeId();
+      const change: FileChange = {
+        id: proposalId,
+        toolCallId: stringValue(data.tool_call_id),
+        workspaceId: stringValue(data.workspace_id),
+        virtualPath: stringValue(data.virtual_path) ?? "未知文件",
+        operation: stringValue(data.operation),
+        beforeSha256: stringValue(data.before_sha256),
+        afterSha256: stringValue(data.after_sha256),
+      };
+      setFileChanges((items) => [...items.filter((item) => item.id !== proposalId), change]);
+    } else if (event.event === "verification") {
+      const toolCallId = stringValue(data.tool_call_id) ?? makeId();
+      const result: VerificationResult = {
+        id: toolCallId,
+        toolCallId: stringValue(data.tool_call_id),
+        profile: stringValue(data.profile) ?? "default",
+        status: stringValue(data.status) ?? "error",
+        exitCode: typeof data.exit_code === "number" ? data.exit_code : null,
+        truncated: data.truncated === true,
+      };
+      setVerifications((items) => [...items.filter((item) => item.id !== toolCallId), result]);
     } else if (event.event === "approval_required") {
-      setApprovals((items) => [...items,
-        typeof data.message === "string" ? data.message : "此操作需要你的确认"]);
+      const payload = asRecord(data.payload);
+      const approvalId = typeof data.approval_id === "string" ? data.approval_id : makeId();
+      const approval: Approval = {
+        id: approvalId,
+        action: typeof data.action === "string" ? data.action : "sensitive_action",
+        message: typeof data.message === "string" ? data.message : "此操作需要你的确认",
+        repository: stringValue(payload.repository),
+        virtualPath: stringValue(payload.virtual_path),
+        operation: stringValue(payload.operation),
+        diff: stringValue(payload.diff),
+        validationProfile: stringValue(payload.validation_profile),
+        status: "pending",
+      };
+      setApprovals((items) => [...items.filter((item) => item.id !== approvalId), approval]);
     } else if (event.event === "error") {
       terminalRef.current = { generation, status: "failed" };
       setStatus("failed");
       setNotice(safeAgentError(data.code));
     } else if (event.event === "done") {
-      const terminalStatus = data.status === "failed" ? "failed" : "completed";
+      const terminalStatus: TerminalStatus = data.status === "failed"
+        ? "failed"
+        : data.status === "awaiting_approval" ? "awaiting_approval" : "completed";
       terminalRef.current = { generation, status: terminalStatus };
       setStatus(terminalStatus);
+    }
+  }
+
+  async function resumeApproval(approval: Approval, approved: boolean, reason?: string) {
+    if (approval.status !== "pending" || approvalSubmissionsRef.current.has(approval.id)) return;
+    const sessionId = sessionIdsRef.current.get(workspaceId);
+    if (!sessionId) return;
+    approvalSubmissionsRef.current.add(approval.id);
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const generation = ++generationRef.current;
+    terminalRef.current = { generation, status: null };
+    const assistantId = [...messages].reverse().find((message) => message.role === "assistant")?.id ?? makeId();
+    setApprovals((items) => items.map((item) => item.id === approval.id
+      ? { ...item, status: "submitting" } : item));
+    setNotice("");
+    setStatus("resuming");
+
+    try {
+      await streamResume({
+        sessionId,
+        workspaceId,
+        approvalId: approval.id,
+        approved,
+        reason,
+      }, (event) => handleAgentEvent(event, generation, assistantId), { signal: controller.signal });
+      if (generation !== generationRef.current) return;
+      const terminal = terminalRef.current;
+      if (terminal.generation !== generation || !terminal.status) {
+        setStatus("failed");
+        setNotice("连接在完成事件前中断，请重试本轮任务。");
+        setApprovals((items) => items.map((item) => item.id === approval.id
+          ? { ...item, status: "failed" } : item));
+        return;
+      }
+      setApprovals((items) => items.map((item) => item.id === approval.id
+        ? { ...item, status: terminal.status === "failed"
+          ? "failed" : approved ? "approved" : "rejected" } : item));
+    } catch (error) {
+      if (generation !== generationRef.current) return;
+      setStatus(isAbort(error) ? "cancelled" : "failed");
+      if (!isAbort(error)) setNotice("审批提交失败，请检查服务状态后重试。");
+      setApprovals((items) => items.map((item) => item.id === approval.id
+        ? { ...item, status: "failed" } : item));
+    } finally {
+      approvalSubmissionsRef.current.delete(approval.id);
     }
   }
 
@@ -201,10 +301,12 @@ export function App() {
     generationRef.current += 1;
     abortRef.current?.abort();
     abortRef.current = null;
-    setStatus((current) => current === "connecting" || current === "streaming" ? nextStatus : current);
+    setStatus((current) => current === "connecting" || current === "streaming" || current === "resuming"
+      ? nextStatus : current);
   }
 
-  const busy = status === "connecting" || status === "streaming";
+  const busy = status === "connecting" || status === "streaming" || status === "resuming";
+  const composerLocked = busy || status === "awaiting_approval";
 
   return (
     <div className="app-shell">
@@ -318,9 +420,10 @@ export function App() {
               </div>
             )}
 
-            {tools.length > 0 || approvals.length > 0 ? (
+            {tools.length > 0 || approvals.length > 0 || fileChanges.length > 0 || verifications.length > 0 ? (
               <aside className="activity-ledger" aria-label="工具活动">
-                <div className="ledger-title"><span>施工记录</span><small>{tools.length} 条工具事件</small></div>
+                <div className="ledger-title"><span>施工记录</span>
+                  <small>{tools.length + fileChanges.length + verifications.length} 项执行记录</small></div>
                 {tools.map((tool) => (
                   <div className="tool-row" key={tool.id}>
                     <span className={`tool-check ${tool.status}`} aria-hidden="true" />
@@ -328,8 +431,10 @@ export function App() {
                   </div>
                 ))}
                 {approvals.map((approval) => (
-                  <div className="approval-row" key={approval}><strong>等待确认</strong><span>{approval}</span></div>
+                  <ApprovalCard key={approval.id} approval={approval} onDecision={resumeApproval} />
                 ))}
+                {fileChanges.map((change) => <FileChangeCard key={change.id} change={change} />)}
+                {verifications.map((result) => <VerificationCard key={result.id} result={result} />)}
               </aside>
             ) : null}
           </section>
@@ -341,7 +446,7 @@ export function App() {
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
             <label htmlFor="developer-request">告诉小瑶你想分析、修改或验证什么</label>
             <textarea id="developer-request" name="developer-request" value={draft}
-              onChange={(event) => setDraft(event.target.value)} disabled={!workspaceId || busy}
+              onChange={(event) => setDraft(event.target.value)} disabled={!workspaceId || composerLocked}
               placeholder={workspaceId ? "例如：先帮我梳理登录模块，再给出安全的修改计划…" : "先打开一个 Workspace"}
               rows={3}
               onKeyDown={(event) => {
@@ -355,7 +460,8 @@ export function App() {
               {busy ? (
                 <button className="stop-button" type="button" onClick={() => stopRun()}>停止</button>
               ) : (
-                <button className="send-button" type="submit" disabled={!workspaceId || !draft.trim()}>
+                <button className="send-button" type="submit"
+                  disabled={!workspaceId || composerLocked || !draft.trim()}>
                   开始协作 <span aria-hidden="true">↗</span>
                 </button>
               )}
@@ -505,8 +611,16 @@ function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
 }
 
-function updateToolActivity(items: ToolActivity[], name: string, status: string): ToolActivity[] {
-  if (status === "start") return [...items, { id: makeId(), name, status }];
+function updateToolActivity(
+  items: ToolActivity[], name: string, status: string, callId?: string,
+): ToolActivity[] {
+  const activityId = callId ?? makeId();
+  if (status === "start") return [...items, { id: activityId, name, status }];
+  if (callId) {
+    const match = items.find((item) => item.id === callId);
+    if (match) return items.map((item) => item.id === callId ? { ...item, name, status } : item);
+    return [...items, { id: callId, name, status }];
+  }
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
     if (item.name === name && item.status === "start") {
@@ -527,6 +641,15 @@ function safeAgentError(code: unknown) {
   if (code === "upstream_unavailable") return "Agent 引擎暂时不可用，请稍后重试。";
   if (code === "workspace_not_found") return "当前 Workspace 不存在，请重新选择。";
   return "Agent 执行失败，请重试。";
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value ? value : undefined;
+}
+
+function isRunLocked(status: RunStatus) {
+  return status === "connecting" || status === "streaming"
+    || status === "awaiting_approval" || status === "resuming";
 }
 
 function matchesMedia(query: string) {
@@ -565,6 +688,7 @@ function slugify(value: string) {
 function statusLabel(status: RunStatus) {
   return ({
     idle: "等待指令", connecting: "连接引擎", streaming: "协作中",
+    awaiting_approval: "等待主人确认", resuming: "正在恢复任务",
     completed: "本轮完成", failed: "需要处理", cancelled: "已停止",
   })[status];
 }

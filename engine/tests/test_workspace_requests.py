@@ -201,7 +201,16 @@ async def test_tools_resolves_active_and_explicit_workspaces(tmp_path):
     finally:
         await _close_managers(app)
 
-    expected_names = ["list_dir", "find_files", "grep_code", "read_file", "code_search"]
+    expected_names = [
+        "list_dir",
+        "find_files",
+        "grep_code",
+        "read_file",
+        "code_search",
+        "preview_edit_file",
+        "preview_create_file",
+        "apply_workspace_change",
+    ]
     assert active.status_code == 200
     assert [tool["name"] for tool in active.json()["tools"]] == expected_names
     assert [tool["name"] for tool in explicit.json()["tools"]] == expected_names
