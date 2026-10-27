@@ -1,3 +1,4 @@
+# @author lxy
 import os
 from pathlib import Path
 
@@ -24,6 +25,64 @@ def test_registry_round_trip_preserves_workspace_and_repositories(tmp_path):
         ("service", str(source.resolve()))
     ]
     assert (tmp_path / "registry" / "workspaces" / "order-platform" / "workspace.yaml").is_file()
+
+
+def test_registry_rotates_generation_when_workspace_content_or_repositories_change(
+    tmp_path,
+):
+    source = tmp_path / "service"
+    source.mkdir()
+    registry = WorkspaceRegistry(root=tmp_path / "registry")
+    created = registry.create("demo", "Original")
+
+    renamed = registry.get(created.id)
+    renamed.name = "Renamed"
+    renamed = registry.save(renamed)
+    with_repository = registry.add_repository(created.id, "service", source)
+
+    assert renamed.generation != created.generation
+    assert with_repository.generation != renamed.generation
+
+
+def test_registry_recreating_same_workspace_id_uses_a_new_generation(tmp_path):
+    registry = WorkspaceRegistry(root=tmp_path / "registry")
+    original = registry.create("demo", "Original")
+
+    assert registry.delete(original.id) is True
+    recreated = registry.create("demo", "Recreated")
+
+    assert recreated.generation != original.generation
+
+
+def test_registry_migrates_legacy_yaml_generation_once_and_keeps_it_stable(tmp_path):
+    metadata_root = tmp_path / "registry"
+    registry = WorkspaceRegistry(root=metadata_root)
+    workspace = registry.create("demo", "Demo")
+    workspace_file = (
+        metadata_root / "workspaces" / workspace.id / "workspace.yaml"
+    )
+    legacy_payload = registry_module.yaml.safe_load(
+        workspace_file.read_text(encoding="utf-8")
+    )
+    legacy_payload.pop("generation")
+    workspace_file.write_text(
+        registry_module.yaml.safe_dump(
+            legacy_payload,
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    migrated = WorkspaceRegistry(root=metadata_root).get(workspace.id)
+    persisted_payload = registry_module.yaml.safe_load(
+        workspace_file.read_text(encoding="utf-8")
+    )
+    reloaded = WorkspaceRegistry(root=metadata_root).get(workspace.id)
+
+    assert migrated.generation
+    assert persisted_payload["generation"] == migrated.generation
+    assert reloaded.generation == migrated.generation
 
 
 def test_registry_active_switch_and_delete_clears_active_without_deleting_source(tmp_path):

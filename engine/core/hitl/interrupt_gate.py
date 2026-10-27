@@ -18,6 +18,7 @@ HITL (Human-In-The-Loop) 中断门控
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Set
+from uuid import uuid4
 
 from loguru import logger
 
@@ -25,6 +26,7 @@ from loguru import logger
 # ─── 敏感操作集合 ──────────────────────────────────────────────────────────────────
 
 SENSITIVE_ACTIONS: Set[str] = {
+    "edit_file",
     "write_file",
     "git_commit",
     "run_command",
@@ -57,7 +59,12 @@ class ApprovalTimeoutError(Exception):
 
 # ─── 核心门控函数 ──────────────────────────────────────────────────────────────────
 
-def require_approval(action: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def require_approval(
+    action: str,
+    payload: Optional[Dict[str, Any]] = None,
+    *,
+    approval_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     高风险操作审核门控。
 
@@ -82,8 +89,10 @@ def require_approval(action: str, payload: Optional[Dict[str, Any]] = None) -> D
         return {"approved": True, "action": action, "skipped": True}
 
     # 构造中断请求 payload
+    stable_approval_id = approval_id or uuid4().hex
     interrupt_payload = {
         "type": "approval_required",
+        "approval_id": stable_approval_id,
         "action": action,
         "payload": payload or {},
         "message": f"⚠️ 高风险操作需要人工审批: {action}",
@@ -101,15 +110,20 @@ def require_approval(action: str, payload: Optional[Dict[str, Any]] = None) -> D
         logger.warning("HITL 中断恢复值为 None，默认拒绝")
         raise ApprovalRejectedError(action, "未收到有效的审批响应")
 
-    approved = resume_value.get("approved", False) if isinstance(resume_value, dict) else bool(resume_value)
+    if not isinstance(resume_value, dict):
+        raise ApprovalRejectedError(action, "invalid approval response")
+    if resume_value.get("approval_id") != stable_approval_id:
+        raise ApprovalRejectedError(action, "approval id does not match pending change")
+
+    approved = resume_value.get("approved", False)
 
     if not approved:
-        reason = resume_value.get("reason", "") if isinstance(resume_value, dict) else ""
-        reviewer = resume_value.get("reviewer", "unknown") if isinstance(resume_value, dict) else "unknown"
-        logger.warning("❌ 操作被拒绝 | action={} | reviewer={} | reason={}", action, reviewer, reason)
+        reason = resume_value.get("reason", "")
+        reviewer = resume_value.get("reviewer", "unknown")
+        logger.warning("❌ 操作被拒绝 | action={} | reviewer={}", action, reviewer)
         raise ApprovalRejectedError(action, reason)
 
-    reviewer = resume_value.get("reviewer", "unknown") if isinstance(resume_value, dict) else "unknown"
+    reviewer = resume_value.get("reviewer", "unknown")
     logger.info("✅ 操作已批准 | action={} | reviewer={}", action, reviewer)
 
     return {
@@ -165,32 +179,20 @@ def _format_approval_details(action: str, payload: Optional[Dict[str, Any]]) -> 
     lines = [f"操作: {action}"]
 
     # 针对不同操作类型做友好展示
-    if action == "write_file":
-        path = payload.get("arguments", {}).get("path", payload.get("path", "unknown"))
-        content = payload.get("arguments", {}).get("content", "")
-        lines.append(f"目标文件: {path}")
-        if content:
-            preview = content[:200] + ("..." if len(content) > 200 else "")
-            lines.append(f"内容预览:\n{preview}")
+    if action in {"write_file", "edit_file"}:
+        lines.append("请查看结构化 Diff 与虚拟 Workspace 路径")
 
     elif action == "run_command":
-        cmd = payload.get("arguments", {}).get("command", payload.get("command", "unknown"))
-        cwd = payload.get("arguments", {}).get("cwd", "")
-        lines.append(f"命令: {cmd}")
-        if cwd:
-            lines.append(f"工作目录: {cwd}")
+        lines.append("验证命令由服务端受限 profile 决定")
 
     elif action == "git_commit":
         msg = payload.get("arguments", {}).get("message", "")
         lines.append(f"提交信息: {msg}")
 
     elif action == "delete_file":
-        path = payload.get("arguments", {}).get("path", payload.get("path", "unknown"))
-        lines.append(f"删除文件: {path}")
+        lines.append("删除能力未开放")
 
     else:
-        # 通用格式
-        for key, value in payload.items():
-            lines.append(f"{key}: {value}")
+        lines.append("请查看结构化审批信息")
 
     return "\n".join(lines)

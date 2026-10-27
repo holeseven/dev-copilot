@@ -11,7 +11,9 @@ Graph 节点实现
 """
 from __future__ import annotations
 
-import traceback
+import hashlib
+import json
+import re
 from typing import Any, Dict
 
 from langchain_core.messages import (
@@ -25,7 +27,11 @@ from langchain_core.runnables import RunnableConfig
 from loguru import logger
 
 from engine.core.dispatcher.dispatcher import get_agent_dispatcher
-from engine.core.hitl.interrupt_gate import require_approval
+from engine.core.hitl.interrupt_gate import (
+    ApprovalRejectedError,
+    is_sensitive,
+    require_approval,
+)
 from engine.core.memory.memory_retriever import MemoryRetriever
 from engine.core.mcp.manager import MCPManager
 from engine.infra.llm_client import Complexity, get_llm_by_complexity
@@ -34,8 +40,6 @@ from engine.infra.llm_client import Complexity, get_llm_by_complexity
 # ─── 常量 ─────────────────────────────────────────────────────────────────────────
 
 MAX_AGENT_ITERATIONS = 35  # agent_node ReAct 推理最大轮次
-SENSITIVE_TOOLS = {"write_file", "git_commit", "run_command", "delete_file", "shell_exec"}
-
 SYSTEM_PROMPT_TEMPLATE = """你是一个智能助手，负责 {agent_role}。
 请基于用户的问题和可用工具进行推理和回答。
 如果需要使用工具，请通过 function calling 调用。
@@ -142,6 +146,12 @@ async def agent_node(
     # 调用 LLM
     try:
         response: AIMessage = await llm.ainvoke(messages)
+        if getattr(response, "tool_calls", None):
+            normalized_calls = _normalize_tool_calls(
+                response.tool_calls,
+                session_id=f"{state.get('session_id', '')}:{iteration_count}",
+            )
+            response = response.model_copy(update={"tool_calls": normalized_calls})
         messages.append(response)
         logger.info(
             "agent_node LLM 响应 | has_tool_calls={} | content_len={}",
@@ -248,45 +258,61 @@ async def tool_node(
         return {"messages": messages}
 
     tool_results = []
+    normalized_calls = _validated_tool_calls(last_msg.tool_calls)
+    rejected_ids: set[str] = set()
 
-    for tool_call in last_msg.tool_calls:
-        tool_name = tool_call.get("name", "")
-        tool_args = tool_call.get("args", {})
-        tool_id = tool_call.get("id", "")
+    # Complete every approval before starting any tool. A later interrupt replays
+    # this node, so executing earlier calls here would duplicate their side effects.
+    for tool_call in normalized_calls:
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+        tool_id = tool_call["id"]
+        if not is_sensitive(tool_name):
+            continue
+        try:
+            require_approval(
+                action=tool_name,
+                payload={"tool_name": tool_name, "arguments": tool_args},
+                approval_id=tool_id,
+            )
+        except ApprovalRejectedError:
+            rejected_ids.add(tool_id)
 
-        logger.info("执行工具: {} | args={}", tool_name, tool_args)
+    for tool_call in normalized_calls:
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+        tool_id = tool_call["id"]
 
-        # ── HITL 门控：敏感工具需人工审批 ──
-        if tool_name in SENSITIVE_TOOLS:
-            try:
-                require_approval(
-                    action=tool_name,
-                    payload={"tool_name": tool_name, "arguments": tool_args},
-                )
-            except Exception as e:
-                # interrupt 会暂停执行流，这里处理被拒绝的情况
-                reject_msg = ToolMessage(
-                    content=f"[REJECTED] 操作 '{tool_name}' 被拒绝: {str(e)}",
+        logger.info("执行工具 | tool={} | call_id={}", tool_name, tool_id)
+
+        if tool_id in rejected_ids:
+            messages.append(
+                ToolMessage(
+                    content="[REJECTED] Approval was declined.",
                     tool_call_id=tool_id,
                 )
-                messages.append(reject_msg)
-                tool_results.append({"tool": tool_name, "status": "rejected"})
-                continue
+            )
+            tool_results.append(
+                {"tool": tool_name, "tool_call_id": tool_id, "status": "rejected"}
+            )
+            continue
 
         # ── 执行工具 ──
         if mcp_manager is None:
             error_result = ToolMessage(
-                content=f"[ERROR] 工具执行环境未就绪，无法执行 '{tool_name}'",
+                content="[ERROR] Tool execution environment is unavailable.",
                 tool_call_id=tool_id,
             )
             messages.append(error_result)
-            tool_results.append({"tool": tool_name, "status": "error", "msg": "no mcp_manager"})
+            tool_results.append(
+                {"tool": tool_name, "tool_call_id": tool_id, "status": "error", "code": "manager_unavailable"}
+            )
             continue
 
         try:
             await adispatch_custom_event(
                 "tool_status",
-                {"status": "start", "tool_name": tool_name},
+                {"status": "start", "tool_name": tool_name, "tool_call_id": tool_id},
                 config=config,
             )
             result = await mcp_manager.call_tool(tool_name, tool_args)
@@ -296,43 +322,98 @@ async def tool_node(
             if isinstance(result, str) and result.startswith("[ERROR]"):
                 await adispatch_custom_event(
                     "tool_status",
-                    {"status": "error", "tool_name": tool_name},
+                    {"status": "error", "tool_name": tool_name, "tool_call_id": tool_id},
                     config=config,
                 )
                 tool_results.append(
-                    {"tool": tool_name, "status": "error", "msg": result}
+                    {"tool": tool_name, "tool_call_id": tool_id, "status": "error", "code": "tool_reported_error"}
                 )
             else:
                 await adispatch_custom_event(
                     "tool_status",
-                    {"status": "end", "tool_name": tool_name},
+                    {"status": "end", "tool_name": tool_name, "tool_call_id": tool_id},
                     config=config,
                 )
-                tool_results.append({"tool": tool_name, "status": "ok"})
+                tool_results.append({"tool": tool_name, "tool_call_id": tool_id, "status": "ok"})
                 logger.info("工具 {} 执行成功", tool_name)
 
-        except Exception as e:
+        except Exception:
             await adispatch_custom_event(
                 "tool_status",
-                {"status": "error", "tool_name": tool_name},
+                {"status": "error", "tool_name": tool_name, "tool_call_id": tool_id},
                 config=config,
             )
             # 容错：将错误包装为 ToolMessage 回传 LLM
-            error_content = (
-                f"[ERROR] 工具 '{tool_name}' 执行失败:\n"
-                f"{type(e).__name__}: {str(e)}\n"
-                f"{traceback.format_exc()[-500:]}"
-            )
+            error_content = "[ERROR] Tool execution failed."
             error_msg = ToolMessage(content=error_content, tool_call_id=tool_id)
             messages.append(error_msg)
-            tool_results.append({"tool": tool_name, "status": "error", "msg": str(e)})
-            logger.warning("工具 {} 执行失败: {}", tool_name, str(e))
+            tool_results.append(
+                {"tool": tool_name, "tool_call_id": tool_id, "status": "error", "code": "execution_failed"}
+            )
+            logger.opt(exception=True).warning(
+                "工具执行失败 | tool={} | call_id={}", tool_name, tool_id
+            )
 
     logger.info("─── tool_node END | {} tools executed ───", len(tool_results))
     return {
         "messages": messages,
         "tool_results": tool_results,
     }
+
+
+def _normalize_tool_calls(tool_calls: list, *, session_id: str) -> list[dict[str, Any]]:
+    """Return stable, unique call ids without trusting malformed model output."""
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, tool_call in enumerate(tool_calls):
+        tool_name = str(tool_call.get("name", ""))
+        raw_args = tool_call.get("args", {})
+        tool_args = raw_args if isinstance(raw_args, dict) else {}
+        candidate = tool_call.get("id")
+        tool_id = candidate.strip() if isinstance(candidate, str) else ""
+        if not _VALID_TOOL_CALL_ID.fullmatch(tool_id) or tool_id in seen:
+            canonical = json.dumps(
+                {
+                    "session_id": session_id,
+                    "index": index,
+                    "name": tool_name,
+                    "arguments": tool_args,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            )
+            tool_id = f"tool-{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:24]}"
+            while tool_id in seen:
+                tool_id = f"{tool_id}-{index}"
+        seen.add(tool_id)
+        normalized.append({"name": tool_name, "args": tool_args, "id": tool_id})
+    return normalized
+
+
+_VALID_TOOL_CALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+
+
+def _validated_tool_calls(tool_calls: list) -> list[dict[str, Any]]:
+    """Reject unnormalized persisted calls before any approval or side effect."""
+
+    validated: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tool_call in tool_calls:
+        tool_name = str(tool_call.get("name", ""))
+        tool_args = tool_call.get("args", {})
+        tool_id = tool_call.get("id")
+        if not isinstance(tool_args, dict):
+            raise ValueError("tool arguments must be an object")
+        if not isinstance(tool_id, str) or not _VALID_TOOL_CALL_ID.fullmatch(tool_id):
+            raise ValueError("tool call id is not normalized")
+        if tool_id in seen:
+            raise ValueError("tool call ids must be unique")
+        seen.add(tool_id)
+        validated.append({"name": tool_name, "args": tool_args, "id": tool_id})
+    return validated
 
 
 # ─── 辅助函数 ─────────────────────────────────────────────────────────────────────

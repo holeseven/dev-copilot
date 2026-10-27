@@ -61,6 +61,27 @@ class OneStageLLM:
         return AIMessage(content="no tools available")
 
 
+class MalformedToolIdLLM:
+    async def ainvoke(self, messages):
+        return AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "read_file",
+                    "args": {"path": "one.py"},
+                    "id": "",
+                    "type": "tool_call",
+                },
+                {
+                    "name": "read_file",
+                    "args": {"path": "two.py"},
+                    "id": "x" * 300,
+                    "type": "tool_call",
+                },
+            ],
+        )
+
+
 def _initial_state():
     return {
         "messages": [],
@@ -73,6 +94,44 @@ def _initial_state():
         "should_terminate": False,
         "tool_results": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_agent_persists_normalized_ids_used_by_tool_messages(monkeypatch):
+    class Manager:
+        async def call_tool(self, name, arguments):
+            return f"read {arguments['path']}"
+
+    async def ignore_event(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "engine.orchestrator.nodes.get_llm_by_complexity",
+        lambda _: MalformedToolIdLLM(),
+    )
+    monkeypatch.setattr("engine.orchestrator.nodes.adispatch_custom_event", ignore_event)
+    state = _initial_state()
+    state["messages"] = []
+    agent_result = await agent_node(state, config={"configurable": {}})
+    assistant = agent_result["messages"][-1]
+    ids = [call["id"] for call in assistant.tool_calls]
+
+    tool_result = await tool_node(
+        {
+            **state,
+            "messages": agent_result["messages"],
+        },
+        config={"configurable": {"mcp_manager": Manager()}},
+    )
+    result_ids = [
+        message.tool_call_id
+        for message in tool_result["messages"]
+        if isinstance(message, ToolMessage)
+    ]
+
+    assert len(set(ids)) == 2
+    assert all(1 <= len(tool_id) <= 128 for tool_id in ids)
+    assert result_ids == ids
 
 
 @pytest.mark.asyncio
@@ -114,6 +173,7 @@ async def test_graph_runs_real_read_file_loop_across_two_repositories(tmp_path, 
             config={
                 "recursion_limit": 150,
                 "configurable": {
+                    "thread_id": "services-session-1",
                     "workspace_id": "services",
                     "session_id": "session-1",
                     "mcp_manager": manager,
@@ -231,8 +291,14 @@ async def test_tool_node_dispatches_custom_status_events_with_runtime_config(mon
     )
 
     assert [(name, data) for name, data, _ in events] == [
-        ("tool_status", {"status": "start", "tool_name": "read_file"}),
-        ("tool_status", {"status": "end", "tool_name": "read_file"}),
+        (
+            "tool_status",
+            {"status": "start", "tool_name": "read_file", "tool_call_id": "read-one"},
+        ),
+        (
+            "tool_status",
+            {"status": "end", "tool_name": "read_file", "tool_call_id": "read-one"},
+        ),
     ]
     assert all(event_config["configurable"]["workspace_id"] == "services" for _, _, event_config in events)
 
@@ -270,7 +336,7 @@ async def test_tool_node_dispatches_error_status_for_failed_call(monkeypatch):
     )
 
     assert events == [
-        {"status": "start", "tool_name": "read_file"},
-        {"status": "error", "tool_name": "read_file"},
+        {"status": "start", "tool_name": "read_file", "tool_call_id": "read-missing"},
+        {"status": "error", "tool_name": "read_file", "tool_call_id": "read-missing"},
     ]
     assert result["tool_results"][0]["status"] == "error"

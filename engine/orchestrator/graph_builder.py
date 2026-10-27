@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, TypedDict, Anno
 from langchain_core.messages import BaseMessage, ToolMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import InMemorySaver
 from loguru import logger
 
 from engine.core.memory.memory_retriever import MemoryRetriever
@@ -84,6 +85,7 @@ def _after_check(state: GraphState) -> Literal["route", "end"]:
 
 def build_agent_graph(
     recursion_limit: int = 150,
+    checkpointer: Any = None,
 ) -> StateGraph:
     """
     构建完整的 Agent 编排 StateGraph。
@@ -115,7 +117,7 @@ def build_agent_graph(
 
     # ── 编译 ──
     compiled = workflow.compile(
-        checkpointer=None,  # 由上层按需注入 checkpointer
+        checkpointer=checkpointer if checkpointer is not None else InMemorySaver()
     )
 
     logger.info(
@@ -164,6 +166,7 @@ async def run_graph(
     config = {
         "recursion_limit": 150,
         "configurable": {
+            "thread_id": f"session:{session_id}",
             "mcp_manager": mcp_manager,
             "memory_retriever": memory_retriever,
         },

@@ -43,6 +43,8 @@ async def sse_event_generator(
     run_config = config or {"recursion_limit": 150}
 
     failed = False
+    awaiting_approval = False
+    emitted_approval_ids: set[str] = set()
     try:
         async for event in graph.astream_events(
             initial_state, config=run_config, version="v2"
@@ -64,7 +66,6 @@ async def sse_event_generator(
                 yield _sse_line("tool", {
                     "status": "start",
                     "tool_name": name,
-                    "input": _safe_serialize(data.get("input")),
                 })
 
             # ── 工具调用结束 ──
@@ -72,34 +73,21 @@ async def sse_event_generator(
                 yield _sse_line("tool", {
                     "status": "end",
                     "tool_name": name,
-                    "output": _safe_serialize(data.get("output")),
                 })
 
             elif kind == "on_custom_event" and name == "tool_status":
                 yield _sse_line("tool", _safe_serialize(data))
 
-            # ── HITL 中断（interrupt）──
-            elif kind == "on_chain_end" and "interrupt" in str(data).lower():
-                # 检测 interrupt payload
-                output = data.get("output", {})
-                if isinstance(output, dict) and output.get("type") == "approval_required":
-                    yield _sse_line("approval_required", {
-                        "action": output.get("action", ""),
-                        "message": output.get("message", ""),
-                        "details": output.get("details", ""),
-                        "payload": output.get("payload", {}),
-                    })
-
             # ── 检测 __interrupt 信息（LangGraph v2 interrupt 事件）──
             elif kind == "on_chain_stream":
                 chunk_data = data.get("chunk")
-                if isinstance(chunk_data, dict) and chunk_data.get("type") == "approval_required":
-                    yield _sse_line("approval_required", {
-                        "action": chunk_data.get("action", ""),
-                        "message": chunk_data.get("message", ""),
-                        "details": chunk_data.get("details", ""),
-                        "payload": chunk_data.get("payload", {}),
-                    })
+                for approval in _interrupt_approvals(chunk_data):
+                    approval_id = approval["approval_id"]
+                    if approval_id in emitted_approval_ids:
+                        continue
+                    emitted_approval_ids.add(approval_id)
+                    awaiting_approval = True
+                    yield _sse_line("approval_required", approval)
 
     except Exception as exc:
         failed = True
@@ -110,7 +98,57 @@ async def sse_event_generator(
         })
 
     # ── 流结束标记 ──
-    yield _sse_line("done", {"status": "failed" if failed else "completed"})
+    status = "failed" if failed else (
+        "awaiting_approval" if awaiting_approval else "completed"
+    )
+    yield _sse_line("done", {"status": status})
+
+
+_APPROVAL_PAYLOAD_FIELDS = {
+    "approval_id",
+    "operation",
+    "workspace_id",
+    "repository",
+    "virtual_path",
+    "diff",
+    "before_sha256",
+    "after_sha256",
+    "patch_sha256",
+    "validation_profile",
+    "tool_name",
+}
+
+
+def _interrupt_approvals(chunk: Any) -> list[Dict[str, Any]]:
+    if not isinstance(chunk, dict):
+        return []
+    raw_interrupts = chunk.get("__interrupt__", ())
+    if not isinstance(raw_interrupts, (list, tuple)):
+        raw_interrupts = (raw_interrupts,)
+    approvals = []
+    for entry in raw_interrupts:
+        value = getattr(entry, "value", entry)
+        if not isinstance(value, dict) or value.get("type") != "approval_required":
+            continue
+        approval_id = str(value.get("approval_id", ""))
+        if not approval_id:
+            continue
+        payload = value.get("payload", {})
+        safe_payload = {
+            key: _safe_serialize(item)
+            for key, item in payload.items()
+            if key in _APPROVAL_PAYLOAD_FIELDS
+        } if isinstance(payload, dict) else {}
+        approvals.append(
+            {
+                "approval_id": approval_id,
+                "action": str(value.get("action", "")),
+                "message": str(value.get("message", "")),
+                "details": "",
+                "payload": safe_payload,
+            }
+        )
+    return approvals
 
 
 def _safe_serialize(obj: Any) -> Any:

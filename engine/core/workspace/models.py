@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,7 @@ class Workspace(BaseModel):
 
     id: str
     name: str
+    generation: str = Field(default_factory=lambda: uuid4().hex)
     repositories: List[Repository] = Field(default_factory=list)
 
 

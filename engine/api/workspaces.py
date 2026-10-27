@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from engine.core.mcp.local_provider import LocalDevToolProvider
 from engine.core.mcp.manager import MCPManager
-from engine.core.workspace.models import RepositoryScan, Workspace
+from engine.core.workspace.models import Repository, RepositoryScan, Workspace
 
 
 router = APIRouter()
@@ -21,6 +21,14 @@ class WorkspaceCreate(BaseModel):
 class RepositoryCreate(BaseModel):
     name: str = Field(..., min_length=1)
     local_path: str = Field(..., min_length=1)
+
+
+class WorkspaceResponse(BaseModel):
+    """Public workspace shape; checkpoint generation remains server-internal."""
+
+    id: str
+    name: str
+    repositories: List[Repository] = Field(default_factory=list)
 
 
 def resolve_workspace(request: Request, workspace_id: Optional[str]) -> Workspace:
@@ -65,7 +73,7 @@ async def invalidate_workspace_manager(request: Request, workspace_id: str) -> N
         await manager.shutdown()
 
 
-@router.post("", response_model=Workspace, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=WorkspaceResponse, status_code=status.HTTP_201_CREATED)
 async def create_workspace(payload: WorkspaceCreate, request: Request) -> Workspace:
     try:
         return request.app.state.workspace_registry.create(payload.id, payload.name)
@@ -75,12 +83,12 @@ async def create_workspace(payload: WorkspaceCreate, request: Request) -> Worksp
         raise HTTPException(status_code=code, detail=detail) from None
 
 
-@router.get("", response_model=List[Workspace])
+@router.get("", response_model=List[WorkspaceResponse])
 async def list_workspaces(request: Request) -> List[Workspace]:
     return request.app.state.workspace_registry.list()
 
 
-@router.get("/{workspace_id}", response_model=Workspace)
+@router.get("/{workspace_id}", response_model=WorkspaceResponse)
 async def get_workspace(workspace_id: str, request: Request) -> Workspace:
     workspace = request.app.state.workspace_registry.get(workspace_id)
     if workspace is None:
@@ -100,7 +108,7 @@ async def delete_workspace(workspace_id: str, request: Request) -> Response:
 
 @router.post(
     "/{workspace_id}/repositories",
-    response_model=Workspace,
+    response_model=WorkspaceResponse,
     status_code=status.HTTP_201_CREATED,
 )
 async def add_repository(
@@ -139,7 +147,7 @@ async def scan_workspace(
         raise HTTPException(status_code=422, detail=str(exc)) from None
 
 
-@router.post("/{workspace_id}/activate", response_model=Workspace)
+@router.post("/{workspace_id}/activate", response_model=WorkspaceResponse)
 async def activate_workspace(workspace_id: str, request: Request) -> Workspace:
     registry = request.app.state.workspace_registry
     if registry.get(workspace_id) is None:

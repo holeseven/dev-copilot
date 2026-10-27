@@ -257,7 +257,12 @@ async def test_chat_and_tools_return_workspace_resolution_errors(tmp_path):
         )
         unknown_resume = await client.post(
             "/chat/resume",
-            json={"thread_id": "session", "approved": True, "workspace_id": "missing"},
+            json={
+                "session_id": "session",
+                "approval_id": "approval-1",
+                "approved": True,
+                "workspace_id": "missing",
+            },
         )
         unknown_tools = await client.get("/tools", params={"workspace_id": "missing"})
 

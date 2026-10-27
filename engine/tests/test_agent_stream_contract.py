@@ -37,6 +37,14 @@ def _app(tmp_path, graph) -> FastAPI:
     return app
 
 
+def test_internal_thread_id_changes_with_workspace_generation():
+    first = chat._thread_id("workspace-1", "generation-1", "session-1")
+    second = chat._thread_id("workspace-1", "generation-2", "session-1")
+
+    assert first != second
+    assert first == chat._thread_id("workspace-1", "generation-1", "session-1")
+
+
 @pytest.mark.asyncio
 async def test_chat_requires_explicit_session_and_workspace_ids(tmp_path):
     class Graph:
@@ -87,11 +95,18 @@ async def test_chat_stream_contract_and_graph_scope(tmp_path, monkeypatch):
                 "event": "on_chain_stream",
                 "data": {
                     "chunk": {
-                        "type": "approval_required",
-                        "action": "write_file",
-                        "message": "Approve change?",
-                        "details": "README.md",
-                        "payload": {"path": "README.md"},
+                        "__interrupt__": (
+                            SimpleNamespace(
+                                value={
+                                    "type": "approval_required",
+                                    "approval_id": "approval-1",
+                                    "action": "write_file",
+                                    "message": "Approve change?",
+                                    "details": "README.md",
+                                    "payload": {"path": "README.md"},
+                                }
+                            ),
+                        ),
                     }
                 },
             }
@@ -125,7 +140,6 @@ async def test_chat_stream_contract_and_graph_scope(tmp_path, monkeypatch):
             {
                 "status": "start",
                 "tool_name": "read_file",
-                "input": {"path": "README.md"},
             },
         ),
         (
@@ -133,22 +147,24 @@ async def test_chat_stream_contract_and_graph_scope(tmp_path, monkeypatch):
             {
                 "status": "end",
                 "tool_name": "read_file",
-                "output": {"content": "ok"},
             },
         ),
         (
             "approval_required",
             {
+                "approval_id": "approval-1",
                 "action": "write_file",
                 "message": "Approve change?",
-                "details": "README.md",
-                "payload": {"path": "README.md"},
+                "details": "",
+                "payload": {},
             },
         ),
-        ("done", {"status": "completed"}),
+        ("done", {"status": "awaiting_approval"}),
     ]
     assert graph.initial_state["session_id"] == "session-1"
     assert graph.config["configurable"]["session_id"] == "session-1"
+    assert graph.config["configurable"]["thread_id"]
+    assert graph.config["configurable"]["thread_id"] != "session-1"
     assert graph.config["configurable"]["workspace_id"] == "workspace-1"
     assert graph.config["configurable"]["mcp_manager"] is manager
     assert graph.config["configurable"]["dispatcher"] is app.state.dispatcher
@@ -190,3 +206,98 @@ async def test_chat_stream_emits_error_before_done(tmp_path, monkeypatch):
         ("done", {"status": "failed"}),
     ]
     assert "graph failed" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_resume_validates_checkpoint_approval_and_reuses_internal_thread(
+    tmp_path, monkeypatch
+):
+    class Graph:
+        config = None
+        command = None
+
+        async def aget_state(self, config):
+            self.config = config
+            approval = SimpleNamespace(
+                value={
+                    "type": "approval_required",
+                    "approval_id": "approval-1",
+                }
+            )
+            return SimpleNamespace(
+                tasks=(SimpleNamespace(interrupts=(approval,)),)
+            )
+
+        async def astream_events(self, command, *, config, version):
+            self.command = command
+            self.config = config
+            if False:
+                yield
+
+    async def get_manager(request, workspace):
+        return object()
+
+    monkeypatch.setattr(chat, "get_workspace_manager", get_manager)
+    graph = Graph()
+    app = _app(tmp_path, graph)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/chat/resume",
+            json={
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "approval_id": "approval-1",
+                "approved": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert _parse_sse(response.text) == [("done", {"status": "completed"})]
+    workspace = app.state.workspace_registry.get("workspace-1")
+    assert graph.config["configurable"]["thread_id"] == chat._thread_id(
+        "workspace-1", workspace.generation, "session-1"
+    )
+    assert graph.command.resume["approval_id"] == "approval-1"
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_non_pending_approval_without_running_graph(
+    tmp_path, monkeypatch
+):
+    class Graph:
+        started = False
+
+        async def aget_state(self, config):
+            return SimpleNamespace(tasks=())
+
+        async def astream_events(self, command, *, config, version):
+            self.started = True
+            if False:
+                yield
+
+    async def get_manager(request, workspace):
+        return object()
+
+    monkeypatch.setattr(chat, "get_workspace_manager", get_manager)
+    graph = Graph()
+    app = _app(tmp_path, graph)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/chat/resume",
+            json={
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "approval_id": "stale-approval",
+                "approved": True,
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "approval is not pending for this workspace session"
+    )
+    assert graph.started is False

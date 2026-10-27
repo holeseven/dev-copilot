@@ -24,6 +24,7 @@ from engine.infra.dynamic_config import get_dynamic_config
 from engine.infra.llm_client import Complexity, get_llm_by_complexity
 from engine.infra.redis_client import close_redis, init_redis
 from engine.core.dispatcher.dispatcher import get_agent_dispatcher
+from engine.core.hitl.coordinator import ApprovalCoordinator
 from engine.core.workspace.registry import WorkspaceRegistry
 from engine.core.workspace.scanner import WorkspaceScanner
 from engine.orchestrator.graph_builder import build_agent_graph
@@ -63,6 +64,7 @@ async def lifespan(app: FastAPI):
         path_guard=app.state.workspace_registry.path_guard
     )
     app.state.agent_graph = build_agent_graph()
+    app.state.approval_coordinator = ApprovalCoordinator()
     app.state.dispatcher = get_agent_dispatcher()
     app.state.mcp_managers = {}
     app.state.workspace_manager_lock = asyncio.Lock()

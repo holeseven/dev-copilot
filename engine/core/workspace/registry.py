@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 from shutil import rmtree
 from typing import Collection, List, Optional, Union
+from uuid import uuid4
 
 import yaml
 
@@ -93,6 +94,15 @@ class WorkspaceRegistry:
         stored = self._copy(workspace)
         for repository in stored.repositories:
             repository.path = str(self.path_guard.bind(repository).root)
+        existing = self._workspaces.get(stored.id)
+        if existing is not None:
+            if (
+                existing.name != stored.name
+                or existing.repositories != stored.repositories
+            ):
+                stored.generation = uuid4().hex
+            else:
+                stored.generation = existing.generation
         payload = yaml.safe_dump(
             stored.model_dump(mode="json"),
             allow_unicode=True,
@@ -120,8 +130,11 @@ class WorkspaceRegistry:
     def _load_workspaces(self) -> dict[str, Workspace]:
         workspaces = {}
         for workspace_file in sorted(self._workspaces_root.glob("*/workspace.yaml")):
+            raw_workspace = yaml.safe_load(
+                workspace_file.read_text(encoding="utf-8")
+            ) or {}
             workspace = Workspace.model_validate(
-                yaml.safe_load(workspace_file.read_text(encoding="utf-8")) or {}
+                raw_workspace
             )
             for repository in workspace.repositories:
                 try:
@@ -129,6 +142,13 @@ class WorkspaceRegistry:
                 except WorkspacePathError as exc:
                     raise WorkspacePathError(f"persisted {exc}") from exc
             workspaces[workspace.id] = workspace
+            if "generation" not in raw_workspace:
+                payload = yaml.safe_dump(
+                    workspace.model_dump(mode="json"),
+                    allow_unicode=True,
+                    sort_keys=False,
+                )
+                self._write_workspace_atomically(workspace_file, payload)
         return workspaces
 
     @staticmethod
