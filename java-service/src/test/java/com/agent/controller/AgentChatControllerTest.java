@@ -1,6 +1,11 @@
 package com.agent.controller;
 
 import com.agent.client.AgentChatRequest;
+import com.agent.client.AgentApprovalPayload;
+import com.agent.client.AgentPendingApproval;
+import com.agent.client.AgentPendingApprovalRequest;
+import com.agent.client.AgentPendingApprovalResponse;
+import com.agent.client.AgentPendingApprovalStatus;
 import com.agent.client.AgentResumeRequest;
 import com.agent.client.PythonAgentClient;
 import com.agent.client.PythonAgentGatewayException;
@@ -12,6 +17,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -79,6 +85,68 @@ class AgentChatControllerTest {
         assertThat(client.resumeCalls).isEqualTo(1);
         assertThat(client.resumeRequest).isEqualTo(
                 new AgentResumeRequest("session-1", "workspace-1", "approval-1", false, "not safe"));
+    }
+
+    @Test
+    void exposesVersionedPendingApprovalEndpoint() throws Exception {
+        StubPythonAgentClient client = new StubPythonAgentClient(Flux.empty());
+        client.pendingResult = new AgentPendingApprovalResponse(
+                "workspace-1", "session-1", AgentPendingApprovalStatus.AWAITING_APPROVAL, List.of(
+                new AgentPendingApproval(
+                        "approval-1",
+                        "apply_workspace_change",
+                        "请确认修改",
+                        new AgentApprovalPayload(
+                                "apply_workspace_change", "replace", "workspace-1", "service",
+                                "service/app.py", "diff", "before", "after", "patch", "python_pytest")
+                )
+        ));
+        MockMvc mvc = standaloneSetup(new AgentChatController(client))
+                .setControllerAdvice(new ApiExceptionHandler())
+                .build();
+
+        MvcResult pending = mvc.perform(post("/api/v1/agent/chat/pending")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"session-1","workspace_id":"workspace-1"}
+                                """))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mvc.perform(asyncDispatch(pending))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.workspace_id").value("workspace-1"))
+                .andExpect(jsonPath("$.session_id").value("session-1"))
+                .andExpect(jsonPath("$.status").value("awaiting_approval"))
+                .andExpect(jsonPath("$.approvals[0].approval_id").value("approval-1"))
+                .andExpect(jsonPath("$.approvals[0].payload.virtual_path").value("service/app.py"))
+                .andExpect(jsonPath("$.approvals[0].payload.validation_profile").value("python_pytest"));
+        assertThat(client.pendingCalls).isEqualTo(1);
+        assertThat(client.pendingRequest).isEqualTo(
+                new AgentPendingApprovalRequest("session-1", "workspace-1"));
+    }
+
+    @Test
+    void rejectsInvalidPendingApprovalRequestBeforeCallingEngine() throws Exception {
+        StubPythonAgentClient client = new StubPythonAgentClient(Flux.empty());
+        LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
+        validator.afterPropertiesSet();
+        MockMvc mvc = standaloneSetup(new AgentChatController(client))
+                .setControllerAdvice(new ApiExceptionHandler())
+                .setValidator(validator)
+                .build();
+
+        mvc.perform(post("/api/v1/agent/chat/pending")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":" ","workspace_id":""}
+                                """))
+                .andExpect(status().isBadRequest());
+
+        assertThat(client.pendingCalls).isZero();
     }
 
     @Test
@@ -235,6 +303,10 @@ class AgentChatControllerTest {
         private int calls;
         private int resumeCalls;
         private AgentResumeRequest resumeRequest;
+        private int pendingCalls;
+        private AgentPendingApprovalRequest pendingRequest;
+        private AgentPendingApprovalResponse pendingResult = new AgentPendingApprovalResponse(
+                "workspace-1", "session-1", AgentPendingApprovalStatus.IDLE, List.of());
 
         private StubPythonAgentClient(Flux<ServerSentEvent<String>> result) {
             super(WebClient.builder(), "http://127.0.0.1:1");
@@ -252,6 +324,13 @@ class AgentChatControllerTest {
             resumeCalls++;
             resumeRequest = request;
             return result;
+        }
+
+        @Override
+        public Mono<AgentPendingApprovalResponse> pendingApprovals(AgentPendingApprovalRequest request) {
+            pendingCalls++;
+            pendingRequest = request;
+            return Mono.just(pendingResult);
         }
     }
 }

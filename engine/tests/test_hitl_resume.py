@@ -21,6 +21,8 @@ from engine.core.streaming.sse_engine import sse_event_generator
 from engine.core.workspace.change_service import ControlledChangeService
 from engine.core.workspace.models import Repository, Workspace
 from engine.core.workspace.path_guard import WorkspacePathGuard
+from engine.core.workspace.proposal_store import SqliteProposalStore
+from engine.infra.checkpoint import open_sqlite_checkpointer
 from engine.api.chat import _resume_stream_once
 from engine.orchestrator.nodes import _normalize_tool_calls, tool_node
 
@@ -174,11 +176,11 @@ class RecordingManager:
         return "applied"
 
 
-def _tool_graph():
+def _tool_graph(checkpointer=None):
     workflow = StateGraph(ToolState)
     workflow.add_node("tools", tool_node)
     workflow.set_entry_point("tools")
-    return workflow.compile(checkpointer=InMemorySaver())
+    return workflow.compile(checkpointer=checkpointer or InMemorySaver())
 
 
 def _write_state():
@@ -485,10 +487,12 @@ async def test_real_controlled_change_waits_for_approval_then_applies_and_tests(
         repositories=[Repository(name="service", path=str(root))],
     )
     guard = WorkspacePathGuard.from_roots((tmp_path,))
+    proposal_database = tmp_path / "proposals.sqlite3"
     service = ControlledChangeService(
         workspace=workspace,
         path_guard=guard,
         runner_factory=Runner,
+        proposal_store=SqliteProposalStore(proposal_database),
     )
     provider = LocalDevToolProvider(
         "local", workspace, guard, change_service=service
@@ -506,7 +510,7 @@ async def test_real_controlled_change_waits_for_approval_then_applies_and_tests(
             "validation_profile": "python_pytest",
         },
     )
-    graph = _tool_graph()
+    checkpoint_database = tmp_path / "checkpoints.sqlite3"
     config = {
         "configurable": {
             "thread_id": "controlled-change",
@@ -534,27 +538,48 @@ async def test_real_controlled_change_waits_for_approval_then_applies_and_tests(
     }
 
     try:
-        await graph.ainvoke(state, config=config)
-        snapshot = await graph.aget_state(config)
-        approval = snapshot.tasks[0].interrupts[0].value
+        async with open_sqlite_checkpointer(checkpoint_database) as first_saver:
+            graph = _tool_graph(first_saver)
+            await graph.ainvoke(state, config=config)
+            snapshot = await graph.aget_state(config)
+            approval = snapshot.tasks[0].interrupts[0].value
 
-        assert target.read_text(encoding="utf-8") == "value = 1\n"
-        assert Runner.runs == 0
-        assert approval["approval_id"] == preview["proposal_id"]
-        assert approval["payload"]["virtual_path"] == "service/app.py"
-        assert "value = 2" in approval["payload"]["diff"]
+            assert target.read_text(encoding="utf-8") == "value = 1\n"
+            assert Runner.runs == 0
+            assert approval["approval_id"] == preview["proposal_id"]
+            assert approval["payload"]["virtual_path"] == "service/app.py"
+            assert "value = 2" in approval["payload"]["diff"]
+        await manager.shutdown()
 
-        await graph.ainvoke(
-            Command(
-                resume={
-                    "approval_id": preview["proposal_id"],
-                    "approved": True,
-                }
-            ),
-            config=config,
+        restarted_service = ControlledChangeService(
+            workspace=workspace,
+            path_guard=guard,
+            runner_factory=Runner,
+            proposal_store=SqliteProposalStore(proposal_database),
         )
+        restarted_provider = LocalDevToolProvider(
+            "local", workspace, guard, change_service=restarted_service
+        )
+        restarted_manager = MCPManager(
+            [{"name": "local", "type": "local", "provider": restarted_provider}]
+        )
+        await restarted_manager.init_all()
+        config["configurable"]["mcp_manager"] = restarted_manager
+        async with open_sqlite_checkpointer(checkpoint_database) as second_saver:
+            restarted_graph = _tool_graph(second_saver)
+            await restarted_graph.ainvoke(
+                Command(
+                    resume={
+                        "approval_id": preview["proposal_id"],
+                        "approved": True,
+                    }
+                ),
+                config=config,
+            )
     finally:
         await manager.shutdown()
+        if "restarted_manager" in locals():
+            await restarted_manager.shutdown()
 
     assert target.read_text(encoding="utf-8") == "value = 2\n"
     assert Runner.runs == 1

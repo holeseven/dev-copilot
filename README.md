@@ -16,11 +16,12 @@
 - FastAPI 提供的单文件薄工作台，可在 Python 本地开发模式下切换 Workspace、注册仓库、扫描和发起只读问答；
 - Java 提供版本化的统一聊天 SSE 与 Workspace API，并在容器模式中作为唯一公开业务入口；
 - Java 到 Python 的 SSE 代理保留消息、工具、审批、文件变更和验证事件，支持 `/api/v1/agent/chat/resume` 恢复审批中的任务，区分连接前 HTTP 错误与流中失败，并向上游传播取消；
+- LangGraph checkpoint 与受控修改提案持久化到本地 SQLite；Engine 重启后，工作台会按 Workspace 恢复待审批 Diff，并继续使用原会话批准或拒绝；
 - React 产品工作台“**小瑶开发助手**”：管理本地 Workspace、扫描项目、流式对话、查看工具施工记录，在内联 Diff 卡片中批准或拒绝单次修改，并展示写入和自动测试结果；页面只调用 Java `/api/v1`。
 
 下列能力仍在开发中，请不要把现有占位模块视为可用功能：
 
-- 可跨进程重启和多实例恢复的持久化 checkpoint，以及长期审计记录；
+- 面向多 Engine 实例的共享 checkpoint、分布式审批锁，以及长期审计记录；
 - Workspace RAG 索引、增量更新与来源引用；
 - 面向多人或公网部署的认证、授权和租户隔离。
 
@@ -37,6 +38,7 @@ Java Spring Boot ───────────── MySQL / Redis
        ▼
 Python FastAPI + LangGraph ── Workspace Registry / Scanner
        │                    └─ Workspace 隔离的读取、变更提案、审批写入与测试运行时
+       ├─ SQLite（checkpoint 与待审批变更提案）
        └─ Redis（动态配置与现有基础设施）
 ```
 
@@ -47,7 +49,7 @@ Python FastAPI + LangGraph ── Workspace Registry / Scanner
 - `DEV_COPILOT_ALLOWED_ROOT` 以只读方式挂载为容器内 `/workspace`；注册表等可写元数据保存在独立 `engine-metadata` volume。
 - 仓库注册路径可以是绝对宿主机/容器路径，但必须位于明确的允许根目录内。注册后，只读工具仅接受仓库内的虚拟相对路径，并拒绝绝对路径、盘符/UNC 路径、`..` 越界、损坏链接，以及通过 symlink/junction（Windows reparse point）逃逸；无法检查或解析时 fail closed。
 - 本地进程模式下，代码修改采用“预览提案 → 展示 Diff → 单次人工批准 → 原子写入 → 固定测试配置验证”的闭环；提案绑定 Workspace、目标文件内容哈希和审批 ID，目标在批准前发生变化时会拒绝写入。测试命令及参数由服务端白名单确定，不接受模型提供任意 shell 命令。
-- 当前 checkpoint 使用进程内 `InMemorySaver`。审批可以跨 HTTP 请求恢复，但 Engine 重启后会丢失，尚不支持多实例共享恢复；这不是持久化审计系统。
+- checkpoint 与服务端变更提案写入 `WORKSPACE_METADATA_DIR` 下的 SQLite 数据库；单 Engine 进程重启后可以恢复待审批任务。SQLite 方案面向本地单实例，尚不支持多个 Engine 实例共享审批锁，也不等同于长期审计系统。
 - 当前没有用户认证。允许根目录应尽量小，不要挂载整个用户目录、磁盘根目录或敏感凭据目录。
 
 ## Docker Compose 快速启动
@@ -165,6 +167,8 @@ uv run --project engine --frozen --extra dev python scripts/verify.py
 | `REDIS_URL` | Python Redis 地址 | `redis://localhost:6379/0` |
 | `WORKSPACE_ALLOWED_ROOTS` | Python 本地模式允许根目录；JSON 数组或系统路径分隔列表 | 回退到 `WORKSPACE_DIR` |
 | `WORKSPACE_METADATA_DIR` | Workspace 注册元数据目录 | `~/.dev-copilot` |
+| `CHECKPOINT_DB_PATH` | LangGraph checkpoint SQLite 路径 | `${WORKSPACE_METADATA_DIR}/checkpoints.sqlite3` |
+| `PROPOSAL_DB_PATH` | 受控修改提案 SQLite 路径 | `${WORKSPACE_METADATA_DIR}/proposals.sqlite3` |
 | `APP_HOST` | Python 监听地址 | `127.0.0.1` |
 | `APP_PORT` | Python 监听端口 | `8000` |
 
@@ -195,8 +199,9 @@ dev-copilot/
 
 - 公开 Workspace 接口位于 Java `/api/v1/workspaces`；创建、查询、删除、注册仓库、扫描和激活操作由 Java 转发到内部 Python Engine。
 - `POST /api/v1/agent/chat` 必须提供 `message`、`session_id` 和 `workspace_id`，通过 SSE 返回消息、工具状态、审批、文件变更和验证事件。
+- `POST /api/v1/agent/chat/pending` 使用 `session_id` 和 `workspace_id` 查询当前待审批项；React 只把这两个不透明 ID 保存在浏览器本地，不保存代码、Diff 或提示词。
 - 收到 `approval_required` 后，使用相同的 `session_id`、`workspace_id` 和服务端签发的 `approval_id` 调用 `POST /api/v1/agent/chat/resume`，传入 `approved` 及可选的 `reason`。批准只对应当前一项 Diff；拒绝不会写入该变更。
-- 恢复能力当前依赖 Python Engine 进程内的 `InMemorySaver`，只保证同一运行中跨请求恢复；Engine 重启或切换实例后不能继续原审批。
+- 恢复状态由 Python Engine 的 SQLite checkpoint 与服务端提案库共同提供；同一 metadata 目录下重启 Engine 可以继续原审批。多实例部署仍需要共享数据库与分布式锁，当前版本不支持。
 
 ## License
 

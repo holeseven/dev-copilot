@@ -33,6 +33,7 @@ dependencies = [
     "langchain-text-splitters>=0.3.0",
     # MCP 协议
     "mcp>=1.0.0",
+    "langgraph-checkpoint-sqlite>=3.1.2",
 ]
 
 [project.optional-dependencies]

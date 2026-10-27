@@ -68,10 +68,250 @@ async def test_chat_requires_explicit_session_and_workspace_ids(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_pending_returns_only_safe_checkpoint_approvals(tmp_path):
+    class Graph:
+        async def aget_state(self, config):
+            approval = SimpleNamespace(
+                value={
+                    "type": "approval_required",
+                    "approval_id": "approval-1",
+                    "action": "apply_workspace_change",
+                    "message": "Approve change?",
+                    "details": "C:/secret/root",
+                    "payload": {
+                        "workspace_id": "workspace-1",
+                        "virtual_path": "service/app.py",
+                        "diff": "+safe code",
+                        "patch_sha256": "hash",
+                        "new_content": "must-not-leak",
+                        "repository_root": "C:/secret/root",
+                    },
+                }
+            )
+            return SimpleNamespace(tasks=(SimpleNamespace(interrupts=(approval,)),))
+
+    app = _app(tmp_path, Graph())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/chat/pending",
+            json={"session_id": "session-1", "workspace_id": "workspace-1"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "workspace_id": "workspace-1",
+        "session_id": "session-1",
+        "status": "awaiting_approval",
+        "approvals": [
+            {
+                "approval_id": "approval-1",
+                "action": "apply_workspace_change",
+                "message": "Approve change?",
+                "details": "",
+                "payload": {
+                    "workspace_id": "workspace-1",
+                    "virtual_path": "service/app.py",
+                    "diff": "+safe code",
+                    "patch_sha256": "hash",
+                },
+            }
+        ],
+    }
+    assert "must-not-leak" not in response.text
+    assert "C:/secret/root" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_pending_is_idle_without_interrupts(tmp_path):
+    class Graph:
+        async def aget_state(self, config):
+            return SimpleNamespace(tasks=())
+
+    app = _app(tmp_path, Graph())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/chat/pending",
+            json={"session_id": "session-1", "workspace_id": "workspace-1"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "workspace_id": "workspace-1",
+        "session_id": "session-1",
+        "status": "idle",
+        "approvals": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_pending_fails_closed_when_checkpoint_is_unavailable(tmp_path):
+    class Graph:
+        async def aget_state(self, config):
+            raise OSError("database unavailable")
+
+    app = _app(tmp_path, Graph())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/chat/pending",
+            json={"session_id": "session-1", "workspace_id": "workspace-1"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "checkpoint_unavailable"
+    assert "database unavailable" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_pending_queries_for_same_thread_are_serialized(tmp_path):
+    class Graph:
+        active = 0
+        max_active = 0
+
+        async def aget_state(self, config):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0.02)
+            self.active -= 1
+            return SimpleNamespace(tasks=())
+
+    graph = Graph()
+    app = _app(tmp_path, graph)
+    transport = httpx.ASGITransport(app=app)
+    payload = {"session_id": "session-1", "workspace_id": "workspace-1"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first, second = await asyncio.gather(
+            client.post("/chat/pending", json=payload),
+            client.post("/chat/pending", json=payload),
+        )
+
+    assert first.status_code == second.status_code == 200
+    assert graph.max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_reports_checkpoint_failure_without_leaking(tmp_path, monkeypatch):
+    class Graph:
+        inspections = 0
+        started = False
+
+        async def aget_state(self, config):
+            self.inspections += 1
+            if self.inspections == 1:
+                return SimpleNamespace(tasks=())
+            raise OSError("secret database path")
+
+        async def astream_events(self, initial_state, *, config, version):
+            self.started = True
+            if False:
+                yield
+
+    async def get_manager(request, workspace):
+        return object()
+
+    monkeypatch.setattr(chat, "get_workspace_manager", get_manager)
+    graph = Graph()
+    app = _app(tmp_path, graph)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/chat",
+            json={
+                "message": "inspect",
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+            },
+        )
+
+    assert response.status_code == 200
+    assert _parse_sse(response.text) == [
+        (
+            "error",
+            {
+                "code": "checkpoint_unavailable",
+                "message": "Agent checkpoint storage is temporarily unavailable.",
+            },
+        ),
+        ("done", {"status": "failed"}),
+    ]
+    assert "secret database path" not in response.text
+    assert graph.started is False
+
+
+@pytest.mark.asyncio
+async def test_resume_stream_reports_checkpoint_failure_without_leaking(tmp_path, monkeypatch):
+    class Graph:
+        inspections = 0
+        started = False
+
+        async def aget_state(self, config):
+            self.inspections += 1
+            if self.inspections == 1:
+                approval = SimpleNamespace(
+                    value={
+                        "type": "approval_required",
+                        "approval_id": "approval-1",
+                    }
+                )
+                return SimpleNamespace(
+                    tasks=(SimpleNamespace(interrupts=(approval,)),)
+                )
+            raise OSError("secret database path")
+
+        async def astream_events(self, command, *, config, version):
+            self.started = True
+            if False:
+                yield
+
+    async def get_manager(request, workspace):
+        return object()
+
+    monkeypatch.setattr(chat, "get_workspace_manager", get_manager)
+    graph = Graph()
+    app = _app(tmp_path, graph)
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/chat/resume",
+            json={
+                "session_id": "session-1",
+                "workspace_id": "workspace-1",
+                "approval_id": "approval-1",
+                "approved": True,
+            },
+        )
+
+    assert response.status_code == 200
+    assert _parse_sse(response.text) == [
+        (
+            "error",
+            {
+                "code": "checkpoint_unavailable",
+                "message": "Agent checkpoint storage is temporarily unavailable.",
+            },
+        ),
+        ("done", {"status": "failed"}),
+    ]
+    assert "secret database path" not in response.text
+    assert graph.started is False
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_contract_and_graph_scope(tmp_path, monkeypatch):
     class Graph:
         initial_state = None
         config = None
+
+        async def aget_state(self, config):
+            return SimpleNamespace(tasks=())
 
         async def astream_events(self, initial_state, *, config, version):
             self.initial_state = initial_state
@@ -218,6 +458,9 @@ async def test_chat_stream_contract_and_graph_scope(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_stream_emits_error_before_done(tmp_path, monkeypatch):
     class Graph:
+        async def aget_state(self, config):
+            return SimpleNamespace(tasks=())
+
         async def astream_events(self, initial_state, *, config, version):
             raise RuntimeError("graph failed")
             yield

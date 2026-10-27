@@ -39,6 +39,22 @@ def test_secure_local_defaults_are_backward_compatible() -> None:
     assert settings.workspace_allowed_root_paths == (
         Path(settings.workspace_dir).expanduser().resolve(),
     )
+    assert settings.resolved_checkpoint_db_path == (
+        settings.workspace_metadata_path / "checkpoints.sqlite3"
+    )
+    assert settings.resolved_proposal_db_path == (
+        settings.workspace_metadata_path / "proposals.sqlite3"
+    )
+
+
+def test_checkpoint_paths_can_be_overridden(tmp_path: Path) -> None:
+    settings = make_settings(
+        checkpoint_db_path=str(tmp_path / "checkpoints.db"),
+        proposal_db_path=str(tmp_path / "proposals.db"),
+    )
+
+    assert settings.resolved_checkpoint_db_path == (tmp_path / "checkpoints.db").resolve()
+    assert settings.resolved_proposal_db_path == (tmp_path / "proposals.db").resolve()
 
 
 def test_allowed_roots_accept_json_array(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

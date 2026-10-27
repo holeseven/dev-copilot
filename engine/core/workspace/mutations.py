@@ -179,6 +179,11 @@ class WorkspaceMutator:
         """Forget an unneeded issued proposal while preserving consumed history."""
         self._issued.pop(approval_id, None)
 
+    def restore(self, proposal: MutationProposal) -> None:
+        """Restore only the server-issued hash needed for full revalidation."""
+
+        self._issued[proposal.approval_id] = proposal.patch_sha256
+
     def _proposal(
         self,
         *,

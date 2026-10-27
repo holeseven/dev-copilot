@@ -9,6 +9,7 @@ import pytest
 from engine.api import workspaces
 from engine.core.workspace.registry import WorkspaceRegistry
 from engine.core.workspace.scanner import WorkspaceScanner
+from engine.core.workspace.proposal_store import SqliteProposalStore
 
 
 class ClosingManager:
@@ -29,6 +30,7 @@ def _client(tmp_path, allowed_roots=None, *, raise_server_exceptions=True):
     )
     app.state.mcp_managers = {}
     app.state.workspace_manager_lock = asyncio.Lock()
+    app.state.proposal_store = SqliteProposalStore(tmp_path / "proposals.sqlite3")
     app.include_router(workspaces.router, prefix="/workspaces")
     return TestClient(app, raise_server_exceptions=raise_server_exceptions), app
 
@@ -214,12 +216,15 @@ async def test_workspace_manager_passes_registry_path_guard_to_local_provider(
     workspace = registry.create("demo", "Demo")
     captured = {}
 
+    proposal_store = object()
+
     class CapturingProvider:
-        def __init__(self, name, received_workspace, path_guard):
+        def __init__(self, name, received_workspace, path_guard, *, change_service):
             captured.update(
                 name=name,
                 workspace=received_workspace,
                 path_guard=path_guard,
+                proposal_store=change_service.proposal_store,
             )
 
     class FakeManager:
@@ -233,6 +238,7 @@ async def test_workspace_manager_passes_registry_path_guard_to_local_provider(
     monkeypatch.setattr(workspaces, "MCPManager", FakeManager)
     app = FastAPI()
     app.state.workspace_registry = registry
+    app.state.proposal_store = proposal_store
     app.state.mcp_managers = {}
     app.state.workspace_manager_lock = asyncio.Lock()
 
@@ -242,4 +248,5 @@ async def test_workspace_manager_passes_registry_path_guard_to_local_provider(
         "name": "local",
         "workspace": workspace,
         "path_guard": registry.path_guard,
+        "proposal_store": proposal_store,
     }

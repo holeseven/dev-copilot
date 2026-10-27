@@ -16,7 +16,11 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from engine.core.hitl.coordinator import ApprovalCoordinator
-from engine.core.streaming.sse_engine import _sse_line, sse_event_generator
+from engine.core.streaming.sse_engine import (
+    _interrupt_approvals,
+    _sse_line,
+    sse_event_generator,
+)
 from engine.api.workspaces import get_workspace_manager, resolve_workspace
 
 router = APIRouter()
@@ -42,6 +46,15 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=20_000, description="用户消息")
     session_id: str = Field(..., min_length=1, max_length=128, description="会话 ID")
     workspace_id: str = Field(..., min_length=1, max_length=128, description="Workspace ID")
+
+
+class PendingRequest(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=128)
+    workspace_id: str = Field(..., min_length=1, max_length=128)
+
+
+class CheckpointUnavailableError(RuntimeError):
+    """The durable graph state could not be inspected safely."""
 
 
 class ResumeRequest(BaseModel):
@@ -100,7 +113,11 @@ async def chat(request: ChatRequest, http_request: Request):
         },
     }
 
-    if await _pending_approval_ids(graph, config):
+    try:
+        pending_ids = await _pending_approval_ids(graph, config)
+    except CheckpointUnavailableError:
+        raise _checkpoint_unavailable_http_error() from None
+    if pending_ids:
         raise HTTPException(
             status_code=409,
             detail="this workspace session is awaiting approval",
@@ -123,6 +140,38 @@ async def chat(request: ChatRequest, http_request: Request):
 
 
 # ─── POST /chat/resume ────────────────────────────────────────────────────────
+
+@router.post("/pending")
+async def pending(request: PendingRequest, http_request: Request):
+    """Return sanitized approvals stored for one external workspace session."""
+
+    workspace = resolve_workspace(http_request, request.workspace_id)
+    config = {
+        "configurable": {
+            "thread_id": _thread_id(
+                workspace.id, workspace.generation, request.session_id
+            ),
+            "workspace_id": workspace.id,
+            "session_id": request.session_id,
+        }
+    }
+    lock = await _approval_coordinator(http_request).lock_for(
+        config["configurable"]["thread_id"]
+    )
+    async with lock:
+        try:
+            approvals = await _pending_approvals(
+                http_request.app.state.agent_graph, config
+            )
+        except CheckpointUnavailableError:
+            raise _checkpoint_unavailable_http_error() from None
+    return {
+        "workspace_id": request.workspace_id,
+        "session_id": request.session_id,
+        "status": "awaiting_approval" if approvals else "idle",
+        "approvals": approvals,
+    }
+
 
 @router.post("/resume")
 async def resume(request: ResumeRequest, http_request: Request):
@@ -190,6 +239,8 @@ async def resume(request: ResumeRequest, http_request: Request):
 
     except HTTPException:
         raise
+    except CheckpointUnavailableError:
+        raise _checkpoint_unavailable_http_error() from None
     except ImportError:
         raise HTTPException(status_code=501, detail="LangGraph Command 模块不可用")
     except Exception as exc:
@@ -199,23 +250,40 @@ async def resume(request: ResumeRequest, http_request: Request):
 
 async def _pending_approval_ids(graph, config: dict) -> set[str]:
     """Read approval ids from the checkpoint instead of trusting the client."""
+    return {
+        approval["approval_id"]
+        for approval in await _pending_approvals(graph, config)
+    }
+
+
+async def _pending_approvals(graph, config: dict) -> list[dict]:
+    """Read sanitized checkpoint approvals and fail closed on storage errors."""
+
     try:
         snapshot = await graph.aget_state(config)
-    except Exception:
+    except Exception as exc:
         logger.opt(exception=True).warning("Unable to inspect pending approvals")
-        return set()
-    pending = set()
+        raise CheckpointUnavailableError("checkpoint state is unavailable") from exc
+    pending: list[dict] = []
+    seen: set[str] = set()
     for task in getattr(snapshot, "tasks", ()):
         for item in getattr(task, "interrupts", ()):
-            value = getattr(item, "value", None)
-            if not isinstance(value, dict):
-                continue
-            if value.get("type") != "approval_required":
-                continue
-            approval_id = value.get("approval_id")
-            if isinstance(approval_id, str) and approval_id:
-                pending.add(approval_id)
+            for approval in _interrupt_approvals({"__interrupt__": (item,)}):
+                approval_id = approval["approval_id"]
+                if approval_id not in seen:
+                    seen.add(approval_id)
+                    pending.append(approval)
     return pending
+
+
+def _checkpoint_unavailable_http_error() -> HTTPException:
+    return HTTPException(
+        status_code=503,
+        detail={
+            "code": "checkpoint_unavailable",
+            "message": "Agent checkpoint storage is temporarily unavailable.",
+        },
+    )
 
 
 async def _chat_stream_once(
@@ -227,7 +295,19 @@ async def _chat_stream_once(
     thread_id = config["configurable"]["thread_id"]
     lock = await coordinator.lock_for(thread_id)
     async with lock:
-        if await _pending_approval_ids(graph, config):
+        try:
+            pending_ids = await _pending_approval_ids(graph, config)
+        except CheckpointUnavailableError:
+            yield _sse_line(
+                "error",
+                {
+                    "code": "checkpoint_unavailable",
+                    "message": "Agent checkpoint storage is temporarily unavailable.",
+                },
+            )
+            yield _sse_line("done", {"status": "failed"})
+            return
+        if pending_ids:
             yield _sse_line(
                 "error",
                 {
@@ -253,7 +333,19 @@ async def _resume_stream_once(
     thread_id = config["configurable"]["thread_id"]
     lock = await coordinator.lock_for(thread_id)
     async with lock:
-        if approval_id not in await _pending_approval_ids(graph, config):
+        try:
+            pending_ids = await _pending_approval_ids(graph, config)
+        except CheckpointUnavailableError:
+            yield _sse_line(
+                "error",
+                {
+                    "code": "checkpoint_unavailable",
+                    "message": "Agent checkpoint storage is temporarily unavailable.",
+                },
+            )
+            yield _sse_line("done", {"status": "failed"})
+            return
+        if approval_id not in pending_ids:
             yield _sse_line(
                 "error",
                 {

@@ -10,6 +10,7 @@ from engine.core.workspace.change_service import (
     ControlledChangeService,
     ProposalUnavailableError,
 )
+from engine.core.workspace.proposal_store import SqliteProposalStore
 from engine.core.workspace.models import Repository, Workspace
 from engine.core.workspace.mutations import MutationConflictError
 from engine.core.workspace.path_guard import WorkspacePathGuard
@@ -71,6 +72,8 @@ def _service(
     ttl: float = 1800,
     max_pending: int = 100,
     runner_factory=RecordingRunner,
+    proposal_store=None,
+    generation: str | None = None,
 ):
     allowed = tmp_path / "allowed"
     root = allowed / "service"
@@ -79,6 +82,7 @@ def _service(
     workspace = Workspace(
         id="workspace-1",
         name="Demo",
+        **({"generation": generation} if generation is not None else {}),
         repositories=[Repository(name="service", path=str(root))],
     )
     service = ControlledChangeService(
@@ -88,8 +92,31 @@ def _service(
         clock=clock or FakeClock(),
         proposal_ttl_seconds=ttl,
         max_pending=max_pending,
+        proposal_store=proposal_store,
     )
     return service, root
+
+
+def _restarted_service(
+    tmp_path: Path,
+    root: Path,
+    *,
+    generation: str,
+    proposal_store: SqliteProposalStore,
+):
+    workspace = Workspace(
+        id="workspace-1",
+        name="Demo",
+        generation=generation,
+        repositories=[Repository(name="service", path=str(root))],
+    )
+    return ControlledChangeService(
+        workspace=workspace,
+        path_guard=WorkspacePathGuard.from_roots((tmp_path / "allowed",)),
+        runner_factory=RecordingRunner,
+        clock=FakeClock(),
+        proposal_store=proposal_store,
+    )
 
 
 def test_preview_is_read_only_and_returns_only_safe_public_fields(tmp_path):
@@ -225,6 +252,70 @@ async def test_apply_writes_once_then_runs_bound_profile(tmp_path):
         )
     assert RecordingRunner.runs == [("service", "python_pytest")]
 
+
+@pytest.mark.asyncio
+async def test_persisted_proposal_can_be_approved_after_service_restart(tmp_path):
+    store = SqliteProposalStore(tmp_path / "proposals.sqlite3")
+    service, root = _service(
+        tmp_path,
+        generation="generation-1",
+        proposal_store=store,
+    )
+    preview = service.preview_create(
+        "service/restarted.py", "restored = True\n", "python_pytest"
+    )
+
+    restarted = _restarted_service(
+        tmp_path,
+        root,
+        generation="generation-1",
+        proposal_store=SqliteProposalStore(tmp_path / "proposals.sqlite3"),
+    )
+    approval = restarted.approval_request(
+        preview["proposal_id"], preview["patch_sha256"]
+    )
+    result = await restarted.apply_approved(
+        preview["proposal_id"],
+        preview["patch_sha256"],
+        approval.approval_id,
+    )
+
+    assert (root / "restarted.py").read_text(encoding="utf-8") == "restored = True\n"
+    assert result["status"] == "applied_and_tests_passed"
+
+
+@pytest.mark.asyncio
+async def test_persisted_proposal_is_consumed_once_across_service_instances(tmp_path):
+    database = tmp_path / "proposals.sqlite3"
+    first, root = _service(
+        tmp_path,
+        generation="generation-1",
+        proposal_store=SqliteProposalStore(database),
+    )
+    preview = first.preview_create(
+        "service/once.py", "only_once = True\n", "python_pytest"
+    )
+    second = _restarted_service(
+        tmp_path,
+        root,
+        generation="generation-1",
+        proposal_store=SqliteProposalStore(database),
+    )
+
+    results = await asyncio.gather(
+        first.apply_approved(
+            preview["proposal_id"], preview["patch_sha256"], preview["proposal_id"]
+        ),
+        second.apply_approved(
+            preview["proposal_id"], preview["patch_sha256"], preview["proposal_id"]
+        ),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(item, ProposalUnavailableError) for item in results) == 1
+    assert sum(isinstance(item, dict) for item in results) == 1
+    assert (root / "once.py").read_text(encoding="utf-8") == "only_once = True\n"
+    assert RecordingRunner.runs == [("service", "python_pytest")]
 
 @pytest.mark.asyncio
 async def test_hash_or_approval_mismatch_never_writes_or_runs_tests(tmp_path):

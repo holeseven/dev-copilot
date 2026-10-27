@@ -12,6 +12,7 @@ from engine.core.workspace.models import Workspace
 from engine.core.workspace.path_guard import WorkspacePathGuard
 from engine.core.streaming.sse_engine import sse_event_generator
 from engine.core.workspace.registry import WorkspaceRegistry
+from engine.core.workspace.proposal_store import SqliteProposalStore
 
 
 class FakeDispatcher:
@@ -32,12 +33,16 @@ class CapturingGraph:
             "data": {"chunk": AIMessageChunk(content="answer")},
         }
 
+    async def aget_state(self, config):
+        return SimpleNamespace(tasks=())
+
 
 def _app(tmp_path):
     app = FastAPI()
     app.state.workspace_registry = WorkspaceRegistry(tmp_path / "metadata")
     app.state.mcp_managers = {}
     app.state.workspace_manager_lock = asyncio.Lock()
+    app.state.proposal_store = SqliteProposalStore(tmp_path / "proposals.sqlite3")
     app.state.agent_graph = CapturingGraph()
     app.state.dispatcher = FakeDispatcher()
     app.include_router(chat.router, prefix="/chat")
@@ -70,6 +75,7 @@ async def test_concurrent_manager_creation_reuses_one_initialized_instance(monke
             state=SimpleNamespace(
                 mcp_managers={},
                 workspace_manager_lock=asyncio.Lock(),
+                    proposal_store=object(),
                     workspace_registry=SimpleNamespace(
                         path_guard=WorkspacePathGuard.from_roots(())
                     ),
@@ -118,6 +124,7 @@ def _runtime_request(tmp_path):
         workspace_registry=registry,
         mcp_managers={},
         workspace_manager_lock=asyncio.Lock(),
+        proposal_store=SqliteProposalStore(tmp_path / "proposals.sqlite3"),
     )
     return SimpleNamespace(app=SimpleNamespace(state=state)), registry
 

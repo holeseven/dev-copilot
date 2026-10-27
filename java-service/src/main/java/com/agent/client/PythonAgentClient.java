@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 /**
  * 调用 Python Agent 的 SSE 客户端。
@@ -48,6 +49,42 @@ public class PythonAgentClient {
      */
     public Flux<ServerSentEvent<String>> streamResume(AgentResumeRequest request) {
         return stream("/chat/resume", request);
+    }
+
+    /**
+     * 查询同一 Workspace 会话当前由 checkpoint 保存的待审批项。
+     */
+    public Mono<AgentPendingApprovalResponse> pendingApprovals(
+            AgentPendingApprovalRequest request
+    ) {
+        return webClient.post()
+                .uri("/chat/pending")
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .bodyValue(request)
+                .exchangeToMono(response -> {
+                    if (response.statusCode().is2xxSuccessful()) {
+                        return response.bodyToMono(AgentPendingApprovalResponse.class)
+                                .switchIfEmpty(Mono.error(new PythonAgentGatewayException(
+                                        "Python Agent 返回空待审批响应",
+                                        new IllegalStateException("empty pending approval response")
+                                )));
+                    }
+                    int status = response.statusCode().value();
+                    return response.releaseBody().then(Mono.error(
+                            new PythonAgentGatewayException(
+                                    "Python Agent 返回异常状态 " + status,
+                                    status
+                            )
+                    ));
+                })
+                .onErrorMap(
+                        exception -> !(exception instanceof PythonAgentGatewayException),
+                        exception -> new PythonAgentGatewayException(
+                                "读取 Python Agent 待审批响应失败",
+                                exception
+                        )
+                );
     }
 
     private Flux<ServerSentEvent<String>> stream(String uri, Object request) {

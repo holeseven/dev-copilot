@@ -1,7 +1,7 @@
 // @author lxy
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { streamChat, streamResume } from "./chat";
+import { getPendingApprovals, streamChat, streamResume } from "./chat";
 
 const encoder = new TextEncoder();
 
@@ -89,5 +89,31 @@ describe("streamChat", () => {
       approved: false,
       reason: "needs tests",
     });
+  });
+
+  it("queries pending approvals with only workspace and session ids", async () => {
+    const signal = new AbortController().signal;
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      workspace_id: "workspace-1",
+      session_id: "session-1",
+      status: "awaiting_approval",
+      approvals: [],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await getPendingApprovals({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+    }, { signal });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/v1/agent/chat/pending");
+    expect(init.method).toBe("POST");
+    expect(init.signal).toBe(signal);
+    expect(JSON.parse(init.body as string)).toEqual({
+      workspace_id: "workspace-1",
+      session_id: "session-1",
+    });
+    expect(result.status).toBe("awaiting_approval");
   });
 });

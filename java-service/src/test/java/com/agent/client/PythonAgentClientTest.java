@@ -118,6 +118,154 @@ class PythonAgentClientTest {
     }
 
     @Test
+    void postsPendingRequestAndDecodesOnlyTheTypedApprovalContract() throws Exception {
+        AtomicReference<String> method = new AtomicReference<>();
+        AtomicReference<String> path = new AtomicReference<>();
+        AtomicReference<String> accept = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        startServer("/chat/pending", exchange -> {
+            method.set(exchange.getRequestMethod());
+            path.set(exchange.getRequestURI().getPath());
+            accept.set(exchange.getRequestHeaders().getFirst(HttpHeaders.ACCEPT));
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            send(exchange, 200, MediaType.APPLICATION_JSON_VALUE, """
+                    {"workspace_id":"workspace-1","session_id":"session-1","status":"awaiting_approval","approvals":[{"approval_id":"approval-1","action":"apply_workspace_change","message":"请确认修改","payload":{"tool_name":"apply_workspace_change","operation":"replace","workspace_id":"workspace-1","repository":"service","virtual_path":"service/app.py","diff":"--- a/app.py\\n+++ b/app.py","before_sha256":"before","after_sha256":"after","patch_sha256":"patch","validation_profile":"python_pytest"}}]}
+                    """);
+        });
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        AgentPendingApprovalResponse response = client.pendingApprovals(
+                        new AgentPendingApprovalRequest("session-1", "workspace-1"))
+                .block(Duration.ofSeconds(3));
+
+        assertThat(method.get()).isEqualTo("POST");
+        assertThat(path.get()).isEqualTo("/chat/pending");
+        assertThat(accept.get()).contains(MediaType.APPLICATION_JSON_VALUE);
+        assertThat(objectMapper.readTree(body.get())).isEqualTo(objectMapper.readTree("""
+                {"session_id":"session-1","workspace_id":"workspace-1"}
+                """));
+        assertThat(response).isEqualTo(new AgentPendingApprovalResponse(
+                "workspace-1",
+                "session-1",
+                AgentPendingApprovalStatus.AWAITING_APPROVAL,
+                List.of(
+                new AgentPendingApproval(
+                        "approval-1",
+                        "apply_workspace_change",
+                        "请确认修改",
+                        new AgentApprovalPayload(
+                                "apply_workspace_change",
+                                "replace",
+                                "workspace-1",
+                                "service",
+                                "service/app.py",
+                                "--- a/app.py\n+++ b/app.py",
+                                "before",
+                                "after",
+                                "patch",
+                                "python_pytest"
+                        )
+                )
+        )));
+    }
+
+    @Test
+    void pendingApprovalErrorDoesNotExposeUpstreamBody() throws Exception {
+        startServer("/chat/pending", exchange -> send(exchange, 422, MediaType.APPLICATION_JSON_VALUE,
+                "{\"detail\":\"secret checkpoint detail\"}"));
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        assertThatThrownBy(() -> client.pendingApprovals(
+                        new AgentPendingApprovalRequest("session-1", "workspace-1"))
+                .block(Duration.ofSeconds(3)))
+                .isInstanceOf(PythonAgentGatewayException.class)
+                .hasMessageContaining("422")
+                .hasMessageNotContaining("secret checkpoint detail");
+    }
+
+    @Test
+    void rejectsAnEmptySuccessfulPendingApprovalResponse() {
+        WebClient webClient = WebClient.builder()
+                .exchangeFunction(request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+                        .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                        .build()))
+                .build();
+        PythonAgentClient client = new PythonAgentClient(webClient);
+
+        assertThatThrownBy(() -> client.pendingApprovals(validPendingRequest())
+                .block(Duration.ofSeconds(3)))
+                .isInstanceOf(PythonAgentGatewayException.class)
+                .hasMessageContaining("空待审批响应");
+    }
+
+    @Test
+    void pendingApprovalCancellationCancelsUpstreamResponseBody() {
+        AtomicBoolean cancelled = new AtomicBoolean();
+        Flux<org.springframework.core.io.buffer.DataBuffer> responseBody =
+                Flux.<org.springframework.core.io.buffer.DataBuffer>never()
+                        .doOnCancel(() -> cancelled.set(true));
+        WebClient webClient = WebClient.builder()
+                .exchangeFunction(request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+                        .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                        .body(responseBody)
+                        .build()))
+                .build();
+        PythonAgentClient client = new PythonAgentClient(webClient);
+
+        var subscription = client.pendingApprovals(validPendingRequest()).subscribe();
+        subscription.dispose();
+
+        assertThat(cancelled).isTrue();
+    }
+
+    @Test
+    void ignoresUnknownPendingApprovalFieldsInsteadOfForwardingThem() throws Exception {
+        startServer("/chat/pending", exchange -> send(exchange, 200, MediaType.APPLICATION_JSON_VALUE, """
+                {"workspace_id":"workspace-1","session_id":"session-1","status":"awaiting_approval","internal_thread_id":"must-not-forward","approvals":[{"approval_id":"approval-1","action":"write_file","message":"review","details":"internal","payload":{"virtual_path":"app.py","new_content":"secret source"}}]}
+                """));
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        AgentPendingApprovalResponse response = client.pendingApprovals(validPendingRequest())
+                .block(Duration.ofSeconds(3));
+        JsonNode forwardedJson = objectMapper.valueToTree(response);
+
+        assertThat(forwardedJson.toString())
+                .doesNotContain("internal_thread_id")
+                .doesNotContain("must-not-forward")
+                .doesNotContain("details")
+                .doesNotContain("new_content")
+                .doesNotContain("secret source");
+        assertThat(response.approvals().get(0).payload().virtualPath()).isEqualTo("app.py");
+    }
+
+    @Test
+    void mapsUnknownPendingStatusWithoutLeakingThePayload() throws Exception {
+        startServer("/chat/pending", exchange -> send(exchange, 200, MediaType.APPLICATION_JSON_VALUE, """
+                {"workspace_id":"workspace-1","session_id":"session-1","status":"secret-invalid-status","approvals":[]}
+                """));
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        assertThatThrownBy(() -> client.pendingApprovals(validPendingRequest())
+                .block(Duration.ofSeconds(3)))
+                .isInstanceOf(PythonAgentGatewayException.class)
+                .hasMessage("读取 Python Agent 待审批响应失败")
+                .hasMessageNotContaining("secret-invalid-status");
+    }
+
+    @Test
+    void mapsMalformedPendingJsonWithoutLeakingThePayload() throws Exception {
+        startServer("/chat/pending", exchange -> send(exchange, 200, MediaType.APPLICATION_JSON_VALUE,
+                "{\"secret-checkpoint-content\":"));
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        assertThatThrownBy(() -> client.pendingApprovals(validPendingRequest())
+                .block(Duration.ofSeconds(3)))
+                .isInstanceOf(PythonAgentGatewayException.class)
+                .hasMessage("读取 Python Agent 待审批响应失败")
+                .hasMessageNotContaining("secret-checkpoint-content");
+    }
+
+    @Test
     void mapsUpstreamHttpErrorToGatewayException() throws Exception {
         startServer(exchange -> send(exchange, 422, MediaType.APPLICATION_JSON_VALUE,
                 "{\"detail\":\"workspace missing\"}"));
@@ -171,6 +319,10 @@ class PythonAgentClientTest {
 
     private AgentChatRequest validRequest() {
         return new AgentChatRequest("hello", "session-1", "workspace-1");
+    }
+
+    private AgentPendingApprovalRequest validPendingRequest() {
+        return new AgentPendingApprovalRequest("session-1", "workspace-1");
     }
 
     private void startServer(ExchangeHandler handler) throws IOException {

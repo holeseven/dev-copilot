@@ -46,8 +46,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .eyebrow, .context-label, .welcome-kicker { margin: 0; font: 700 10px/1.2 Consolas, monospace; letter-spacing: .18em; color: var(--amber); }
 .runtime-pill { margin-left: auto; display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); padding: 9px 13px; color: #aeb7bf; font-size: 12px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #75808b; box-shadow: 0 0 0 4px rgba(117,128,139,.1); }
-.status-streaming, .status-connecting, .status-resuming { background: var(--amber); box-shadow: 0 0 0 4px rgba(232,168,73,.12); animation: pulse 1.4s ease-in-out infinite; }
+.status-streaming, .status-connecting, .status-resuming, .status-recovering { background: var(--amber); box-shadow: 0 0 0 4px rgba(232,168,73,.12); animation: pulse 1.4s ease-in-out infinite; }
 .status-awaiting_approval { background: var(--amber-soft); box-shadow: 0 0 0 4px rgba(246,204,131,.13); }
+.status-recovery_failed { background: var(--danger); }
 .status-completed { background: var(--mint); }
 .status-failed { background: var(--danger); }
 
@@ -165,7 +166,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .output-block { border-top: 1px solid #202a31; }
 .output-block > span { display: block; padding: 8px 12px 0; color: #64717a; font: 700 9px Consolas, monospace; text-transform: uppercase; }
 .output-block pre { max-height: 260px; margin: 0; padding: 10px 12px 14px; overflow: auto; color: #bfc7cc; white-space: pre; font: 11px/1.6 Consolas, monospace; }
-.live-region { min-height: 28px; padding: 4px clamp(20px,6vw,84px); color: var(--amber-soft); font-size: 12px; }
+.live-region { min-height: 28px; padding: 4px clamp(20px,6vw,84px); color: var(--amber-soft); font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.live-region button { min-height: 34px; border: 1px solid #705537; background: #211b13; color: var(--amber-soft); padding: 0 12px; }
 .composer { margin: 0 clamp(20px,6vw,84px) 24px; border: 1px solid #38434d; background: #10171e; box-shadow: 0 18px 60px rgba(0,0,0,.35); }
 .composer:focus-within { border-color: #80603a; }
 .composer label { display: block; padding: 12px 16px 0; color: var(--muted); font-size: 11px; }

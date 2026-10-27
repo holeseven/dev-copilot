@@ -23,10 +23,12 @@ from engine.config.settings import get_settings
 from engine.infra.dynamic_config import get_dynamic_config
 from engine.infra.llm_client import Complexity, get_llm_by_complexity
 from engine.infra.redis_client import close_redis, init_redis
+from engine.infra.checkpoint import open_sqlite_checkpointer
 from engine.core.dispatcher.dispatcher import get_agent_dispatcher
 from engine.core.hitl.coordinator import ApprovalCoordinator
 from engine.core.workspace.registry import WorkspaceRegistry
 from engine.core.workspace.scanner import WorkspaceScanner
+from engine.core.workspace.proposal_store import SqliteProposalStore
 from engine.orchestrator.graph_builder import build_agent_graph
 
 
@@ -39,8 +41,17 @@ def _setup_logging() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期：启动初始化基础设施，关闭时释放资源"""
     settings = get_settings()
+    async with open_sqlite_checkpointer(
+        settings.resolved_checkpoint_db_path
+    ) as checkpointer:
+        async with _runtime_lifespan(app, settings, checkpointer):
+            yield
+
+
+@asynccontextmanager
+async def _runtime_lifespan(app: FastAPI, settings, checkpointer):
+    """应用生命周期：启动初始化基础设施，关闭时释放资源"""
     _setup_logging()
     logger.info("正在启动 {} ...", settings.app_name)
 
@@ -63,7 +74,8 @@ async def lifespan(app: FastAPI):
     app.state.workspace_scanner = WorkspaceScanner(
         path_guard=app.state.workspace_registry.path_guard
     )
-    app.state.agent_graph = build_agent_graph()
+    app.state.proposal_store = SqliteProposalStore(settings.resolved_proposal_db_path)
+    app.state.agent_graph = build_agent_graph(checkpointer=checkpointer)
     app.state.approval_coordinator = ApprovalCoordinator()
     app.state.dispatcher = get_agent_dispatcher()
     app.state.mcp_managers = {}

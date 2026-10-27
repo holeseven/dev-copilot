@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from engine.core.mcp.local_provider import LocalDevToolProvider
 from engine.core.mcp.manager import MCPManager
 from engine.core.workspace.models import Repository, RepositoryScan, Workspace
+from engine.core.workspace.change_service import ControlledChangeService
 
 
 router = APIRouter()
@@ -57,6 +58,11 @@ async def get_workspace_manager(request: Request, workspace: Workspace) -> MCPMa
             "local",
             workspace,
             path_guard=request.app.state.workspace_registry.path_guard,
+            change_service=ControlledChangeService(
+                workspace=workspace,
+                path_guard=request.app.state.workspace_registry.path_guard,
+                proposal_store=request.app.state.proposal_store,
+            ),
         )
         manager = MCPManager(
             [{"name": "local", "type": "local", "provider": provider}]

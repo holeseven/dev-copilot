@@ -1,5 +1,6 @@
 # @author lxy
 import asyncio
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -59,7 +60,13 @@ def configure_lifespan_dependencies(tmp_path, monkeypatch, dynamic_config, calls
         log_level="INFO",
         workspace_metadata_path=tmp_path / "metadata",
         workspace_allowed_root_paths=(),
+        resolved_checkpoint_db_path=tmp_path / "checkpoints.sqlite3",
+        resolved_proposal_db_path=tmp_path / "proposals.sqlite3",
     )
+
+    @asynccontextmanager
+    async def open_checkpointer(path):
+        yield object()
 
     async def init_redis():
         calls.append("init-redis")
@@ -72,12 +79,13 @@ def configure_lifespan_dependencies(tmp_path, monkeypatch, dynamic_config, calls
     monkeypatch.setattr(main, "get_llm_by_complexity", lambda _: object())
     monkeypatch.setattr(main, "get_dynamic_config", lambda: dynamic_config)
     monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "open_sqlite_checkpointer", open_checkpointer)
     monkeypatch.setattr(
         main,
         "WorkspaceRegistry",
         lambda **kwargs: WorkspaceRegistry(tmp_path / "metadata"),
     )
-    monkeypatch.setattr(main, "build_agent_graph", object)
+    monkeypatch.setattr(main, "build_agent_graph", lambda **kwargs: object())
     monkeypatch.setattr(main, "get_agent_dispatcher", object)
 
 
@@ -95,6 +103,8 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
         log_level="INFO",
         workspace_metadata_path=metadata_root,
         workspace_allowed_root_paths=(allowed_root.resolve(),),
+        resolved_checkpoint_db_path=metadata_root / "checkpoints.sqlite3",
+        resolved_proposal_db_path=metadata_root / "proposals.sqlite3",
     )
     registry_arguments = []
 
@@ -114,7 +124,24 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
         "WorkspaceRegistry",
         lambda **kwargs: registry_arguments.append(kwargs) or WorkspaceRegistry(**kwargs),
     )
-    monkeypatch.setattr(main, "build_agent_graph", lambda: graph)
+    checkpointer = object()
+    checkpoint_events = []
+
+    @asynccontextmanager
+    async def open_checkpointer(path):
+        checkpoint_events.append(("open", path))
+        try:
+            yield checkpointer
+        finally:
+            checkpoint_events.append(("close", path))
+
+    monkeypatch.setattr(main, "open_sqlite_checkpointer", open_checkpointer)
+    graph_arguments = []
+    monkeypatch.setattr(
+        main,
+        "build_agent_graph",
+        lambda **kwargs: graph_arguments.append(kwargs) or graph,
+    )
     monkeypatch.setattr(main, "get_agent_dispatcher", lambda: dispatcher)
     app = FastAPI()
     manager = ClosingManager()
@@ -127,6 +154,7 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
             is app.state.workspace_registry.path_guard
         )
         assert app.state.agent_graph is graph
+        assert app.state.proposal_store.path == settings.resolved_proposal_db_path.resolve()
         assert app.state.dispatcher is dispatcher
         assert app.state.mcp_managers == {}
         assert app.state.workspace_manager_lock is not None
@@ -142,6 +170,45 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
             "root": metadata_root,
             "allowed_roots": (allowed_root.resolve(),),
         }
+    ]
+    assert graph_arguments == [{"checkpointer": checkpointer}]
+    assert checkpoint_events == [
+        ("open", settings.resolved_checkpoint_db_path),
+        ("close", settings.resolved_checkpoint_db_path),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_closes_checkpointer_when_startup_fails(tmp_path, monkeypatch):
+    settings = SimpleNamespace(
+        app_name="test-engine",
+        log_level="INFO",
+        resolved_checkpoint_db_path=tmp_path / "checkpoints.sqlite3",
+    )
+    events = []
+
+    @asynccontextmanager
+    async def open_checkpointer(path):
+        events.append(("open", path))
+        try:
+            yield object()
+        finally:
+            events.append(("close", path))
+
+    async def fail_redis():
+        raise RuntimeError("redis startup failed")
+
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "open_sqlite_checkpointer", open_checkpointer)
+    monkeypatch.setattr(main, "init_redis", fail_redis)
+
+    with pytest.raises(RuntimeError, match="redis startup failed"):
+        async with main.lifespan(FastAPI()):
+            pass
+
+    assert events == [
+        ("open", settings.resolved_checkpoint_db_path),
+        ("close", settings.resolved_checkpoint_db_path),
     ]
 
 
@@ -165,6 +232,18 @@ async def test_lifespan_closes_manager_initialized_during_teardown(tmp_path, mon
             self.closed = True
 
     dynamic_config = FakeDynamicConfig()
+    settings = SimpleNamespace(
+        app_name="test-engine",
+        log_level="INFO",
+        workspace_metadata_path=tmp_path / "metadata",
+        workspace_allowed_root_paths=(),
+        resolved_checkpoint_db_path=tmp_path / "checkpoints.sqlite3",
+        resolved_proposal_db_path=tmp_path / "proposals.sqlite3",
+    )
+
+    @asynccontextmanager
+    async def open_checkpointer(path):
+        yield object()
 
     async def noop():
         pass
@@ -173,12 +252,14 @@ async def test_lifespan_closes_manager_initialized_during_teardown(tmp_path, mon
     monkeypatch.setattr(main, "close_redis", noop)
     monkeypatch.setattr(main, "get_llm_by_complexity", lambda _: object())
     monkeypatch.setattr(main, "get_dynamic_config", lambda: dynamic_config)
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr(main, "open_sqlite_checkpointer", open_checkpointer)
     monkeypatch.setattr(
         main,
         "WorkspaceRegistry",
         lambda **kwargs: WorkspaceRegistry(tmp_path / "metadata"),
     )
-    monkeypatch.setattr(main, "build_agent_graph", object)
+    monkeypatch.setattr(main, "build_agent_graph", lambda **kwargs: object())
     monkeypatch.setattr(main, "get_agent_dispatcher", object)
     monkeypatch.setattr(workspaces, "MCPManager", BlockingManager)
     app = FastAPI()

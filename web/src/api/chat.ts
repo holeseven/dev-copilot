@@ -15,6 +15,25 @@ export interface ResumeRequest {
   reason?: string;
 }
 
+export interface PendingApprovalsRequest {
+  sessionId: string;
+  workspaceId: string;
+}
+
+export interface PendingApprovalData {
+  approval_id: string;
+  action: string;
+  message: string;
+  payload?: Record<string, unknown>;
+}
+
+export interface PendingApprovalsResponse {
+  workspace_id: string;
+  session_id: string;
+  status: "idle" | "awaiting_approval";
+  approvals: PendingApprovalData[];
+}
+
 export interface StreamChatOptions {
   signal?: AbortSignal;
 }
@@ -47,6 +66,26 @@ export async function streamResume(
     approved: request.approved,
     reason: request.reason,
   }, onEvent, options);
+}
+
+export async function getPendingApprovals(
+  request: PendingApprovalsRequest,
+  options: StreamChatOptions = {},
+): Promise<PendingApprovalsResponse> {
+  const response = await fetch("/api/v1/agent/chat/pending", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      workspace_id: request.workspaceId,
+      session_id: request.sessionId,
+    }),
+    signal: options.signal,
+  });
+  if (!response.ok) throw new Error(`Pending approval request failed with status ${response.status}`);
+  return await response.json() as PendingApprovalsResponse;
 }
 
 async function streamAgentRequest(

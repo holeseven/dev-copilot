@@ -3,10 +3,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { streamChat, streamResume } from "./api/chat";
-import { listWorkspaces } from "./api/workspaces";
+import { getPendingApprovals, streamChat, streamResume } from "./api/chat";
+import { activateWorkspace, deleteWorkspace, listWorkspaces } from "./api/workspaces";
+import { loadWorkspaceSession, saveWorkspaceSession } from "./state/workspaceSessions";
 
-vi.mock("./api/chat", () => ({ streamChat: vi.fn(), streamResume: vi.fn() }));
+vi.mock("./api/chat", () => ({
+  getPendingApprovals: vi.fn(), streamChat: vi.fn(), streamResume: vi.fn(),
+}));
 vi.mock("./api/workspaces", () => ({
   listWorkspaces: vi.fn(),
   createWorkspace: vi.fn(),
@@ -21,6 +24,7 @@ const workspace = { id: "local-dev", name: "本地项目", repositories: [] };
 describe("小瑶开发助手工作台", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     vi.mocked(listWorkspaces).mockResolvedValue([workspace]);
   });
 
@@ -277,5 +281,262 @@ describe("小瑶开发助手工作台", () => {
     fireEvent.click(screen.getByRole("button", { name: /另一个项目/ }));
     await waitFor(() => expect(screen.queryByText("src/main.py")).not.toBeInTheDocument());
     expect(screen.queryByText("验证通过")).not.toBeInTheDocument();
+  });
+
+  it("restores a pending approval on load and resumes with the persisted session", async () => {
+    saveWorkspaceSession("local-dev", "persisted-session");
+    vi.mocked(getPendingApprovals).mockResolvedValue({
+      workspace_id: "local-dev",
+      session_id: "persisted-session",
+      status: "awaiting_approval",
+      approvals: [{
+        approval_id: "restored-approval",
+        action: "apply_workspace_change",
+        message: "恢复待审批修改",
+        payload: {
+          virtual_path: "src/restored.py", diff: "+restored", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      }],
+    });
+    vi.mocked(streamResume).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("src/restored.py")).toBeInTheDocument();
+    expect(screen.getByText("等待主人确认")).toBeInTheDocument();
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "批准并执行" }));
+    await waitFor(() => expect(streamResume).toHaveBeenCalledOnce());
+    expect(vi.mocked(streamResume).mock.calls[0][0]).toMatchObject({
+      workspaceId: "local-dev",
+      sessionId: "persisted-session",
+      approvalId: "restored-approval",
+    });
+  });
+
+  it("fails closed when recovery fails and can retry", async () => {
+    saveWorkspaceSession("local-dev", "persisted-session");
+    vi.mocked(getPendingApprovals)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({
+        workspace_id: "local-dev",
+        session_id: "persisted-session",
+        status: "awaiting_approval",
+        approvals: [{
+          approval_id: "approval-after-retry",
+          action: "apply_workspace_change",
+          message: "重试后恢复",
+          payload: {
+            virtual_path: "retry.py", diff: "+retry", operation: "create",
+            validation_profile: "python_pytest",
+          },
+        }],
+      });
+    render(<App />);
+
+    const retry = await screen.findByRole("button", { name: "重新检查待审批任务" });
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeDisabled();
+    expect(screen.getByRole("button", { name: /梳理项目入口和模块关系/ })).toBeDisabled();
+    fireEvent.click(retry);
+
+    expect(await screen.findByText("retry.py")).toBeInTheDocument();
+    expect(getPendingApprovals).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a stale recovery response after switching workspaces", async () => {
+    saveWorkspaceSession("local-dev", "session-local");
+    saveWorkspaceSession("other", "session-other");
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace,
+      { id: "other", name: "另一个项目", repositories: [] },
+    ]);
+    let resolveFirst!: (value: Awaited<ReturnType<typeof getPendingApprovals>>) => void;
+    let firstSignal: AbortSignal | undefined;
+    const first = new Promise<Awaited<ReturnType<typeof getPendingApprovals>>>((resolve) => {
+      resolveFirst = resolve;
+    });
+    vi.mocked(getPendingApprovals).mockImplementation((request, options) => {
+      if (request.workspaceId === "local-dev") {
+        firstSignal = options?.signal;
+        return first;
+      }
+      return Promise.resolve({
+        workspace_id: "other",
+        session_id: "session-other",
+        status: "awaiting_approval",
+        approvals: [{
+          approval_id: "approval-other",
+          action: "apply_workspace_change",
+          message: "另一个项目审批",
+          payload: {
+            virtual_path: "other.py", diff: "+other", operation: "create",
+            validation_profile: "python_pytest",
+          },
+        }],
+      });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /另一个项目/ });
+
+    fireEvent.click(screen.getByRole("button", { name: /另一个项目/ }));
+    expect(await screen.findByText("other.py")).toBeInTheDocument();
+    expect(firstSignal?.aborted).toBe(true);
+    resolveFirst({
+      workspace_id: "local-dev",
+      session_id: "session-local",
+      status: "awaiting_approval",
+      approvals: [{
+        approval_id: "stale-approval",
+        action: "apply_workspace_change",
+        message: "旧响应",
+        payload: {
+          virtual_path: "stale.py", diff: "+stale", operation: "create",
+          validation_profile: "python_pytest",
+        },
+      }],
+    });
+
+    await waitFor(() => expect(screen.queryByText("stale.py")).not.toBeInTheDocument());
+    expect(screen.getByText("other.py")).toBeInTheDocument();
+  });
+
+  it("fails closed for an unknown recovery status", async () => {
+    saveWorkspaceSession("local-dev", "persisted-session");
+    vi.mocked(getPendingApprovals).mockResolvedValue({
+      workspace_id: "local-dev",
+      session_id: "persisted-session",
+      status: "unexpected" as "idle",
+      approvals: [],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "重新检查待审批任务" })).toBeInTheDocument();
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeDisabled();
+  });
+
+  it("fails closed when idle status contains pending approvals", async () => {
+    saveWorkspaceSession("local-dev", "persisted-session");
+    vi.mocked(getPendingApprovals).mockResolvedValue({
+      workspace_id: "local-dev",
+      session_id: "persisted-session",
+      status: "idle",
+      approvals: [{
+        approval_id: "contradictory-approval",
+        action: "apply_workspace_change",
+        message: "不一致审批",
+        payload: {
+          virtual_path: "unsafe.py", diff: "+unsafe", operation: "create",
+          validation_profile: "python_pytest",
+        },
+      }],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "重新检查待审批任务" })).toBeInTheDocument();
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeDisabled();
+    expect(screen.queryByText("unsafe.py")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["wrong action", { action: "write_file" }],
+    ["missing virtual path", { payload: {
+      diff: "+safe", operation: "create", validation_profile: "python_pytest",
+    } }],
+    ["missing diff", { payload: {
+      virtual_path: "safe.py", operation: "create", validation_profile: "python_pytest",
+    } }],
+    ["unsupported operation", { payload: {
+      virtual_path: "safe.py", diff: "+safe", operation: "delete",
+      validation_profile: "python_pytest",
+    } }],
+    ["missing validation profile", { payload: {
+      virtual_path: "safe.py", diff: "+safe", operation: "create",
+    } }],
+  ])("fails closed for a recovered approval with %s", async (_label, override) => {
+    saveWorkspaceSession("local-dev", "persisted-session");
+    const base = {
+      approval_id: "approval-1",
+      action: "apply_workspace_change",
+      message: "严格校验",
+      payload: {
+        virtual_path: "safe.py", diff: "+safe", operation: "create",
+        validation_profile: "python_pytest",
+      },
+    };
+    vi.mocked(getPendingApprovals).mockResolvedValue({
+      workspace_id: "local-dev",
+      session_id: "persisted-session",
+      status: "awaiting_approval",
+      approvals: [{ ...base, ...override }],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "重新检查待审批任务" })).toBeInTheDocument();
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeDisabled();
+  });
+
+  it("clears workspace state and persisted session after deletion", async () => {
+    saveWorkspaceSession("local-dev", "persisted-session");
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace,
+      { id: "other", name: "另一个项目", repositories: [] },
+    ]);
+    vi.mocked(getPendingApprovals).mockResolvedValue({
+      workspace_id: "local-dev",
+      session_id: "persisted-session",
+      status: "awaiting_approval",
+      approvals: [{
+        approval_id: "approval-to-remove",
+        action: "apply_workspace_change",
+        message: "待删除",
+        payload: {
+          virtual_path: "removed.py", diff: "+removed", operation: "create",
+          validation_profile: "python_pytest",
+        },
+      }],
+    });
+    vi.mocked(deleteWorkspace).mockResolvedValue();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App />);
+    expect(await screen.findByText("removed.py")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "移除" }));
+
+    await waitFor(() => expect(deleteWorkspace).toHaveBeenCalledWith("local-dev"));
+    await waitFor(() => expect(screen.queryByText("removed.py")).not.toBeInTheDocument());
+    expect(loadWorkspaceSession("local-dev")).toBeUndefined();
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeEnabled();
+  });
+
+  it("aborts and ignores a late workspace activation result", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace,
+      { id: "other", name: "另一个项目", repositories: [] },
+    ]);
+    let rejectOther!: (reason?: unknown) => void;
+    let otherSignal: AbortSignal | undefined;
+    vi.mocked(activateWorkspace).mockImplementation((id, options) => {
+      if (id === "other") {
+        otherSignal = options?.signal;
+        return new Promise((_resolve, reject) => { rejectOther = reject; });
+      }
+      return Promise.resolve(workspace);
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /另一个项目/ });
+
+    fireEvent.click(screen.getByRole("button", { name: /另一个项目/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /本地项目/ }));
+    await waitFor(() => expect(otherSignal?.aborted).toBe(true));
+    rejectOther(new Error("late failure"));
+
+    await waitFor(() => expect(screen.queryByText("Workspace 切换失败，请重试。")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /本地项目/ })).toHaveAttribute("aria-current", "true");
   });
 });

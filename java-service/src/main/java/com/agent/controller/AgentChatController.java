@@ -1,6 +1,8 @@
 package com.agent.controller;
 
 import com.agent.client.AgentChatRequest;
+import com.agent.client.AgentPendingApprovalRequest;
+import com.agent.client.AgentPendingApprovalResponse;
 import com.agent.client.AgentResumeRequest;
 import com.agent.client.PythonAgentClient;
 import jakarta.validation.Valid;
@@ -11,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 /**
  * 浏览器访问 Agent 的统一 Java API 入口。
@@ -43,6 +46,17 @@ public class AgentChatController {
     )
     public Flux<ServerSentEvent<String>> resume(@Valid @RequestBody AgentResumeRequest request) {
         return safelyStream(pythonAgentClient.streamResume(request));
+    }
+
+    @PostMapping(
+            value = "/chat/pending",
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public Mono<AgentPendingApprovalResponse> pendingApprovals(
+            @Valid @RequestBody AgentPendingApprovalRequest request
+    ) {
+        return pythonAgentClient.pendingApprovals(request);
     }
 
     private Flux<ServerSentEvent<String>> safelyStream(Flux<ServerSentEvent<String>> upstream) {

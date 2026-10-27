@@ -12,6 +12,7 @@ from engine.core.execution.test_runner import SafeTestRunner
 from engine.core.workspace.models import Workspace
 from engine.core.workspace.mutations import MutationProposal, WorkspaceMutator
 from engine.core.workspace.path_guard import GuardedRepository, WorkspacePathGuard
+from engine.core.workspace.proposal_store import SqliteProposalStore
 
 
 class ProposalUnavailableError(RuntimeError):
@@ -45,6 +46,7 @@ class ControlledChangeService:
         proposal_ttl_seconds: float = 1800,
         max_pending: int = 100,
         max_diff_bytes: int = 256 * 1024,
+        proposal_store: SqliteProposalStore | None = None,
     ) -> None:
         if proposal_ttl_seconds <= 0:
             raise ValueError("proposal_ttl_seconds must be positive")
@@ -59,6 +61,7 @@ class ControlledChangeService:
         self.proposal_ttl_seconds = proposal_ttl_seconds
         self.max_pending = max_pending
         self.max_diff_bytes = max_diff_bytes
+        self.proposal_store = proposal_store
         self.mutator = WorkspaceMutator(workspace=workspace, path_guard=path_guard)
         self._repositories = {
             repository.name: repository for repository in workspace.repositories
@@ -129,6 +132,14 @@ class ControlledChangeService:
         lock = self._repository_locks[prepared.mutation.repository]
         async with lock:
             prepared = self._require_pending(proposal_id, patch_sha256)
+            if self.proposal_store is not None and not self.proposal_store.consume(
+                self.workspace.id,
+                self.workspace.generation,
+                proposal_id,
+                patch_sha256,
+                now=self.clock(),
+            ):
+                self._raise_persisted_state(proposal_id, patch_sha256)
             self._pending.pop(proposal_id, None)
             self._mark_consumed(proposal_id)
             try:
@@ -179,10 +190,30 @@ class ControlledChangeService:
             raise ValueError("mutation diff exceeds the size limit")
         self._prune_expired()
         while len(self._pending) >= self.max_pending:
-            _, evicted = self._pending.popitem(last=False)
+            evicted_id, evicted = self._pending.popitem(last=False)
             self.mutator.discard(evicted.mutation.approval_id)
+            if self.proposal_store is not None:
+                self.proposal_store.discard(
+                    self.workspace.id,
+                    self.workspace.generation,
+                    evicted_id,
+                    "evicted",
+                )
         expires_at = self.clock() + self.proposal_ttl_seconds
         prepared = _PreparedChange(mutation, validation_profile, expires_at)
+        if self.proposal_store is not None:
+            evicted_ids = self.proposal_store.save(
+                workspace_id=self.workspace.id,
+                generation=self.workspace.generation,
+                mutation=mutation,
+                validation_profile=validation_profile,
+                expires_at=expires_at,
+                max_pending=self.max_pending,
+            )
+            for evicted_id in evicted_ids:
+                evicted = self._pending.pop(evicted_id, None)
+                if evicted is not None:
+                    self.mutator.discard(evicted.mutation.approval_id)
         self._pending[mutation.approval_id] = prepared
         return self._public_preview(prepared)
 
@@ -192,11 +223,37 @@ class ControlledChangeService:
         if proposal_id in self._consumed:
             raise ProposalUnavailableError("proposal already consumed")
         prepared = self._pending.get(proposal_id)
+        if prepared is None and self.proposal_store is not None:
+            stored = self.proposal_store.load(
+                self.workspace.id,
+                self.workspace.generation,
+                proposal_id,
+                now=self.clock(),
+            )
+            if stored is not None and stored.state == "pending":
+                prepared = _PreparedChange(
+                    stored.mutation,
+                    stored.validation_profile,
+                    stored.expires_at,
+                )
+                self.mutator.restore(stored.mutation)
+                self._pending[proposal_id] = prepared
+            elif stored is not None and stored.state == "consumed":
+                raise ProposalUnavailableError("proposal already consumed")
+            elif stored is not None and stored.state == "expired":
+                raise ProposalUnavailableError("proposal has expired")
         if prepared is None:
             raise ProposalUnavailableError("proposal is unavailable")
         if self.clock() >= prepared.expires_at:
             self._pending.pop(proposal_id, None)
             self.mutator.discard(proposal_id)
+            if self.proposal_store is not None:
+                self.proposal_store.discard(
+                    self.workspace.id,
+                    self.workspace.generation,
+                    proposal_id,
+                    "expired",
+                )
             raise ProposalUnavailableError("proposal has expired")
         if patch_sha256 != prepared.mutation.patch_sha256:
             raise ProposalUnavailableError("proposal hash does not match")
@@ -208,11 +265,33 @@ class ControlledChangeService:
             if now >= prepared.expires_at:
                 self._pending.pop(proposal_id, None)
                 self.mutator.discard(proposal_id)
+                if self.proposal_store is not None:
+                    self.proposal_store.discard(
+                        self.workspace.id,
+                        self.workspace.generation,
+                        proposal_id,
+                        "expired",
+                    )
 
     def _mark_consumed(self, proposal_id: str) -> None:
         self._consumed[proposal_id] = None
         while len(self._consumed) > self.max_pending:
             self._consumed.popitem(last=False)
+
+    def _raise_persisted_state(self, proposal_id: str, patch_sha256: str) -> None:
+        stored = self.proposal_store.load(
+            self.workspace.id,
+            self.workspace.generation,
+            proposal_id,
+            now=self.clock(),
+        )
+        if stored is not None and stored.state == "consumed":
+            raise ProposalUnavailableError("proposal already consumed")
+        if stored is not None and stored.state == "expired":
+            raise ProposalUnavailableError("proposal has expired")
+        if stored is not None and stored.mutation.patch_sha256 != patch_sha256:
+            raise ProposalUnavailableError("proposal hash does not match")
+        raise ProposalUnavailableError("proposal is unavailable")
 
     def _guarded_repository(self, virtual_path: str) -> GuardedRepository:
         normalized = virtual_path.replace("\\", "/")

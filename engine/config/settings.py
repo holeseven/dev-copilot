@@ -43,6 +43,8 @@ class Settings(BaseSettings):
         default="~/.dev-copilot",
         description="工作区注册表等本地元数据目录",
     )
+    checkpoint_db_path: str | None = Field(default=None)
+    proposal_db_path: str | None = Field(default=None)
     workspace_allowed_roots: str | None = Field(
         default=None,
         description="允许注册的工作区根目录（JSON 数组或系统路径分隔符分隔）",
@@ -69,6 +71,18 @@ class Settings(BaseSettings):
         """Return the canonical local metadata directory without creating it."""
 
         return Path(self.workspace_metadata_dir).expanduser().resolve()
+
+    @property
+    def resolved_checkpoint_db_path(self) -> Path:
+        if self.checkpoint_db_path:
+            return Path(self.checkpoint_db_path).expanduser().resolve()
+        return self.workspace_metadata_path / "checkpoints.sqlite3"
+
+    @property
+    def resolved_proposal_db_path(self) -> Path:
+        if self.proposal_db_path:
+            return Path(self.proposal_db_path).expanduser().resolve()
+        return self.workspace_metadata_path / "proposals.sqlite3"
 
     @property
     def workspace_allowed_root_paths(self) -> tuple[Path, ...]:

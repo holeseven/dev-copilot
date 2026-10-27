@@ -61,6 +61,8 @@ services:
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       WORKSPACE_ALLOWED_ROOTS: '["/workspace"]'
       WORKSPACE_METADATA_DIR: /data/dev-copilot
+      CHECKPOINT_DB_PATH: "${CHECKPOINT_DB_PATH:-/data/dev-copilot/checkpoints.sqlite3}"
+      PROPOSAL_DB_PATH: "${PROPOSAL_DB_PATH:-/data/dev-copilot/proposals.sqlite3}"
     volumes:
       - type: bind
         source: "${DEV_COPILOT_ALLOWED_ROOT:?required}"

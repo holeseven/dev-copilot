@@ -1,7 +1,7 @@
 // @author lxy
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { streamChat, streamResume } from "./api/chat";
+import { getPendingApprovals, streamChat, streamResume } from "./api/chat";
 import type { AgentEvent } from "./api/sse";
 import { ApprovalCard, type Approval } from "./components/ApprovalCard";
 import {
@@ -19,8 +19,13 @@ import {
   scanWorkspace,
   type Workspace,
 } from "./api/workspaces";
+import {
+  loadWorkspaceSession,
+  removeWorkspaceSession,
+  saveWorkspaceSession,
+} from "./state/workspaceSessions";
 
-type RunStatus = "idle" | "connecting" | "streaming" | "awaiting_approval" | "resuming" | "completed" | "failed" | "cancelled";
+type RunStatus = "idle" | "recovering" | "recovery_failed" | "connecting" | "streaming" | "awaiting_approval" | "resuming" | "completed" | "failed" | "cancelled";
 type Message = { id: string; role: "user" | "assistant"; content: string };
 type ToolActivity = { id: string; name: string; status: string };
 type TerminalStatus = "completed" | "failed" | "awaiting_approval";
@@ -53,7 +58,11 @@ export function App() {
   const [status, setStatus] = useState<RunStatus>("idle");
   const [notice, setNotice] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const recoveryAbortRef = useRef<AbortController | null>(null);
+  const activationAbortRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
+  const recoveryGenerationRef = useRef(0);
+  const activationGenerationRef = useRef(0);
   const terminalRef = useRef<{ generation: number; status: TerminalStatus | null }>({
     generation: 0,
     status: null,
@@ -73,8 +82,16 @@ export function App() {
     return () => {
       controller.abort();
       abortRef.current?.abort();
+      recoveryAbortRef.current?.abort();
+      activationAbortRef.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    void recoverWorkspace(workspaceId);
+    return () => recoveryAbortRef.current?.abort();
+  }, [workspaceId]);
 
   async function refreshWorkspaces(signal?: AbortSignal) {
     try {
@@ -89,9 +106,60 @@ export function App() {
     }
   }
 
+  async function recoverWorkspace(targetWorkspaceId: string) {
+    const sessionId = loadWorkspaceSession(targetWorkspaceId);
+    if (!sessionId) {
+      sessionIdsRef.current.delete(targetWorkspaceId);
+      setStatus("idle");
+      return;
+    }
+    sessionIdsRef.current.set(targetWorkspaceId, sessionId);
+    recoveryAbortRef.current?.abort();
+    const controller = new AbortController();
+    recoveryAbortRef.current = controller;
+    const recoveryGeneration = ++recoveryGenerationRef.current;
+    setStatus("recovering");
+    setNotice("");
+    try {
+      const response = await getPendingApprovals(
+        { workspaceId: targetWorkspaceId, sessionId },
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || recoveryGeneration !== recoveryGenerationRef.current) return;
+      if (response.workspace_id !== targetWorkspaceId || response.session_id !== sessionId) {
+        throw new Error("Pending approval response identity mismatch");
+      }
+      if (response.status !== "idle" && response.status !== "awaiting_approval") {
+        throw new Error("Pending approval response status is invalid");
+      }
+      if (!Array.isArray(response.approvals)
+        || response.approvals.some((item) => !stringValue(asRecord(item).approval_id))) {
+        throw new Error("Pending approval response approvals are invalid");
+      }
+      if ((response.status === "idle" && response.approvals.length !== 0)
+        || (response.status === "awaiting_approval" && response.approvals.length === 0)) {
+        throw new Error("Pending approval response is incomplete");
+      }
+      const restored = response.approvals.map((item) => restoredApprovalFromRecord(asRecord(item)));
+      setApprovals(response.status === "awaiting_approval" ? restored : []);
+      setStatus(response.status === "awaiting_approval" ? "awaiting_approval" : "idle");
+      setNotice(response.status === "awaiting_approval" ? "已恢复上次待审批任务。" : "");
+    } catch (error) {
+      if (controller.signal.aborted || recoveryGeneration !== recoveryGenerationRef.current) return;
+      setStatus("recovery_failed");
+      setNotice("无法确认上次任务是否仍在等待审批，请重新检查后再继续。");
+    } finally {
+      if (recoveryAbortRef.current === controller) recoveryAbortRef.current = null;
+    }
+  }
+
   async function chooseWorkspace(nextId: string) {
     if (nextId === workspaceId) return;
     stopRun("cancelled");
+    activationAbortRef.current?.abort();
+    const controller = new AbortController();
+    activationAbortRef.current = controller;
+    const activationGeneration = ++activationGenerationRef.current;
     setWorkspaceId(nextId);
     setMessages([]);
     setTools([]);
@@ -101,10 +169,14 @@ export function App() {
     setVerifications([]);
     setStatus("idle");
     try {
-      await activateWorkspace(nextId);
+      await activateWorkspace(nextId, { signal: controller.signal });
+      if (controller.signal.aborted || activationGeneration !== activationGenerationRef.current) return;
       setNotice("");
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted || activationGeneration !== activationGenerationRef.current) return;
       setNotice("Workspace 切换失败，请重试。");
+    } finally {
+      if (activationAbortRef.current === controller) activationAbortRef.current = null;
     }
   }
 
@@ -113,9 +185,22 @@ export function App() {
     stopRun("cancelled");
     try {
       await deleteWorkspace(id);
+      activationAbortRef.current?.abort();
+      activationAbortRef.current = null;
+      activationGenerationRef.current += 1;
+      sessionIdsRef.current.delete(id);
+      removeWorkspaceSession(id);
       const remaining = workspaces.filter((item) => item.id !== id);
       setWorkspaces(remaining);
       setWorkspaceId(remaining[0]?.id || "");
+      setMessages([]);
+      setTools([]);
+      setScan([]);
+      setApprovals([]);
+      setFileChanges([]);
+      setVerifications([]);
+      setDraft("");
+      setStatus("idle");
       setNotice("Workspace 已移除，本地文件未做任何修改。");
     } catch {
       setNotice("Workspace 删除失败，请稍后重试。");
@@ -145,6 +230,7 @@ export function App() {
     const assistantId = makeId();
     const sessionId = sessionIdsRef.current.get(workspaceId) ?? makeId();
     sessionIdsRef.current.set(workspaceId, sessionId);
+    saveWorkspaceSession(workspaceId, sessionId);
     setMessages((items) => [
       ...items,
       { id: makeId(), role: "user", content: trimmed },
@@ -223,19 +309,8 @@ export function App() {
       };
       setVerifications((items) => [...items.filter((item) => item.id !== toolCallId), result]);
     } else if (event.event === "approval_required") {
-      const payload = asRecord(data.payload);
-      const approvalId = typeof data.approval_id === "string" ? data.approval_id : makeId();
-      const approval: Approval = {
-        id: approvalId,
-        action: typeof data.action === "string" ? data.action : "sensitive_action",
-        message: typeof data.message === "string" ? data.message : "此操作需要你的确认",
-        repository: stringValue(payload.repository),
-        virtualPath: stringValue(payload.virtual_path),
-        operation: stringValue(payload.operation),
-        diff: stringValue(payload.diff),
-        validationProfile: stringValue(payload.validation_profile),
-        status: "pending",
-      };
+      const approval = approvalFromRecord(data);
+      const approvalId = approval.id;
       setApprovals((items) => [...items.filter((item) => item.id !== approvalId), approval]);
     } else if (event.event === "error") {
       terminalRef.current = { generation, status: "failed" };
@@ -260,7 +335,11 @@ export function App() {
     abortRef.current = controller;
     const generation = ++generationRef.current;
     terminalRef.current = { generation, status: null };
-    const assistantId = [...messages].reverse().find((message) => message.role === "assistant")?.id ?? makeId();
+    const existingAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+    const assistantId = existingAssistant?.id ?? makeId();
+    if (!existingAssistant) {
+      setMessages((items) => [...items, { id: assistantId, role: "assistant", content: "" }]);
+    }
     setApprovals((items) => items.map((item) => item.id === approval.id
       ? { ...item, status: "submitting" } : item));
     setNotice("");
@@ -306,7 +385,8 @@ export function App() {
   }
 
   const busy = status === "connecting" || status === "streaming" || status === "resuming";
-  const composerLocked = busy || status === "awaiting_approval";
+  const composerLocked = busy || status === "awaiting_approval"
+    || status === "recovering" || status === "recovery_failed";
 
   return (
     <div className="app-shell">
@@ -402,7 +482,7 @@ export function App() {
                 <p>选择一个 Workspace，然后告诉我今天要完成什么。我会先读取项目，再把每一步工具动作摆在台面上。</p>
                 <div className="prompt-grid">
                   {QUICK_PROMPTS.map((prompt, index) => (
-                    <button type="button" key={prompt} disabled={!workspaceId}
+                    <button type="button" key={prompt} disabled={!workspaceId || composerLocked}
                       onClick={() => void sendMessage(prompt)}>
                       <span>0{index + 1}</span>{prompt}<b aria-hidden="true">→</b>
                     </button>
@@ -440,7 +520,12 @@ export function App() {
           </section>
 
           <div className="live-region" aria-live="polite" role="status">
-            {notice || (status === "completed" ? "小瑶已完成这轮开发分析。" : "")}
+            <span>{notice || (status === "completed" ? "小瑶已完成这轮开发分析。" : "")}</span>
+            {status === "recovery_failed" ? (
+              <button type="button" onClick={() => void recoverWorkspace(workspaceId)}>
+                重新检查待审批任务
+              </button>
+            ) : null}
           </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void sendMessage(); }}>
@@ -647,9 +732,38 @@ function stringValue(value: unknown) {
   return typeof value === "string" && value ? value : undefined;
 }
 
+function approvalFromRecord(data: Record<string, unknown>): Approval {
+  const payload = asRecord(data.payload);
+  return {
+    id: stringValue(data.approval_id) ?? makeId(),
+    action: stringValue(data.action) ?? "sensitive_action",
+    message: stringValue(data.message) ?? "此操作需要你的确认",
+    repository: stringValue(payload.repository),
+    virtualPath: stringValue(payload.virtual_path),
+    operation: stringValue(payload.operation),
+    diff: stringValue(payload.diff),
+    validationProfile: stringValue(payload.validation_profile),
+    status: "pending",
+  };
+}
+
+function restoredApprovalFromRecord(data: Record<string, unknown>): Approval {
+  const payload = asRecord(data.payload);
+  const operation = stringValue(payload.operation);
+  if (stringValue(data.action) !== "apply_workspace_change"
+    || !stringValue(payload.virtual_path)
+    || !stringValue(payload.diff)
+    || (operation !== "create" && operation !== "replace")
+    || !stringValue(payload.validation_profile)) {
+    throw new Error("Pending approval response contains an unsafe approval");
+  }
+  return approvalFromRecord(data);
+}
+
 function isRunLocked(status: RunStatus) {
   return status === "connecting" || status === "streaming"
-    || status === "awaiting_approval" || status === "resuming";
+    || status === "awaiting_approval" || status === "resuming"
+    || status === "recovering" || status === "recovery_failed";
 }
 
 function matchesMedia(query: string) {
@@ -688,6 +802,7 @@ function slugify(value: string) {
 function statusLabel(status: RunStatus) {
   return ({
     idle: "等待指令", connecting: "连接引擎", streaming: "协作中",
+    recovering: "恢复上次任务", recovery_failed: "等待重新检查",
     awaiting_approval: "等待主人确认", resuming: "正在恢复任务",
     completed: "本轮完成", failed: "需要处理", cancelled: "已停止",
   })[status];
