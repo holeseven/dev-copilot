@@ -68,7 +68,13 @@ public class PythonAgentClient {
                                 .switchIfEmpty(Mono.error(new PythonAgentGatewayException(
                                         "Python Agent 返回空待审批响应",
                                         new IllegalStateException("empty pending approval response")
-                                )));
+                                )))
+                                .flatMap(pending -> pendingScopeMatches(request, pending)
+                                        ? Mono.just(pending)
+                                        : Mono.error(new PythonAgentGatewayException(
+                                                "Python Agent 返回的待审批作用域不匹配",
+                                                new IllegalStateException("pending approval scope mismatch")
+                                        )));
                     }
                     int status = response.statusCode().value();
                     return response.releaseBody().then(Mono.error(
@@ -85,6 +91,78 @@ public class PythonAgentClient {
                                 exception
                         )
                 );
+    }
+
+    /**
+     * 查询一次审批的持久化执行结果，并校验返回作用域与请求完全一致。
+     */
+    public Mono<AgentApprovalOutcomeResponse> approvalOutcome(
+            AgentApprovalOutcomeRequest request
+    ) {
+        return webClient.post()
+                .uri("/chat/outcome")
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.APPLICATION_JSON)
+                .bodyValue(request)
+                .exchangeToMono(response -> {
+                    if (response.statusCode().is2xxSuccessful()) {
+                        return response.bodyToMono(AgentApprovalOutcomeResponse.class)
+                                .switchIfEmpty(Mono.error(new PythonAgentGatewayException(
+                                        "Python Agent 返回空审批结果",
+                                        new IllegalStateException("empty approval outcome response")
+                                )))
+                                .flatMap(outcome -> outcomeScopeMatches(request, outcome)
+                                        ? Mono.just(outcome)
+                                        : Mono.error(new PythonAgentGatewayException(
+                                                "Python Agent 返回的审批结果作用域不匹配",
+                                                new IllegalStateException("approval outcome scope mismatch")
+                                        )));
+                    }
+                    int status = response.statusCode().value();
+                    return response.releaseBody().then(Mono.error(
+                            new PythonAgentGatewayException(
+                                    "Python Agent 返回异常状态 " + status,
+                                    status
+                            )
+                    ));
+                })
+                .onErrorMap(
+                        exception -> !(exception instanceof PythonAgentGatewayException),
+                        exception -> new PythonAgentGatewayException(
+                                "读取 Python Agent 审批结果失败",
+                                exception
+                        )
+                );
+    }
+
+    private boolean outcomeScopeMatches(
+            AgentApprovalOutcomeRequest request,
+            AgentApprovalOutcomeResponse outcome
+    ) {
+        return request.workspaceId().equals(outcome.workspaceId())
+                && request.sessionId().equals(outcome.sessionId())
+                && request.approvalId().equals(outcome.approvalId());
+    }
+
+    private boolean pendingScopeMatches(
+            AgentPendingApprovalRequest request,
+            AgentPendingApprovalResponse response
+    ) {
+        if (!request.workspaceId().equals(response.workspaceId())
+                || !request.sessionId().equals(response.sessionId())
+                || response.approvals() == null) {
+            return false;
+        }
+        boolean approvalsMatch = response.approvals().stream().allMatch(approval ->
+                approval != null
+                        && approval.payload() != null
+                        && request.workspaceId().equals(approval.payload().workspaceId()));
+        boolean outcomesMatch = response.outcomes() == null
+                || response.outcomes().stream().allMatch(outcome ->
+                outcome != null
+                        && request.workspaceId().equals(outcome.workspaceId())
+                        && request.sessionId().equals(outcome.sessionId()));
+        return approvalsMatch && outcomesMatch;
     }
 
     private Flux<ServerSentEvent<String>> stream(String uri, Object request) {

@@ -1,7 +1,9 @@
 // @author lxy
 import { useState } from "react";
 
-export type ApprovalStatus = "pending" | "submitting" | "approved" | "rejected" | "failed";
+export type ApprovalStatus = "pending" | "submitting" | "applying" | "approved" | "applied"
+  | "verified" | "verification_failed" | "rejected" | "failed" | "recovery_required"
+  | "outcome_unknown";
 
 export interface Approval {
   id: string;
@@ -48,6 +50,9 @@ export function ApprovalCard({ approval, onDecision }: {
         <p className="approval-validation">执行后验证：<code>{approval.validationProfile}</code></p>
       ) : null}
       <p className="approval-scope">仅批准上方 1 个变更，不会自动批准后续操作。</p>
+      {approval.status === "applying" ? (
+        <p className="approval-progress" role="status">小瑶正在执行，断线后仍会继续</p>
+      ) : null}
 
       {rejecting && pending ? (
         <div className="rejection-form">
@@ -93,8 +98,14 @@ function approvalStatusLabel(status: ApprovalStatus) {
   return ({
     pending: "等待确认",
     submitting: "正在恢复任务…",
+    applying: "正在执行",
     approved: "已批准",
+    applied: "已应用",
+    verified: "已应用并验证",
+    verification_failed: "已应用，验证未通过",
     rejected: "已拒绝",
     failed: "提交失败",
+    recovery_required: "需要人工核对",
+    outcome_unknown: "无法确认执行结果",
   })[status];
 }

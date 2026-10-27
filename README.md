@@ -211,8 +211,9 @@ dev-copilot/
 
 - 公开 Workspace 接口位于 Java `/api/v1/workspaces`；创建、查询、删除、注册仓库、扫描和激活操作由 Java 转发到内部 Python Engine。
 - `POST /api/v1/agent/chat` 必须提供 `message`、`session_id` 和 `workspace_id`，通过 SSE 返回消息、工具状态、审批、文件变更和验证事件。
-- `POST /api/v1/agent/chat/pending` 使用 `session_id` 和 `workspace_id` 查询当前待审批项；React 只把这两个不透明 ID 保存在浏览器本地，不保存代码、Diff 或提示词。
+- `POST /api/v1/agent/chat/pending` 使用 `session_id` 和 `workspace_id` 查询当前待审批项及该会话最近的脱敏执行结果；React 只把这两个不透明 ID 保存在浏览器本地，不保存代码、Diff 或提示词。
 - 收到 `approval_required` 后，使用相同的 `session_id`、`workspace_id` 和服务端签发的 `approval_id` 调用 `POST /api/v1/agent/chat/resume`，传入 `approved` 及可选的 `reason`。批准只对应当前一项 Diff；拒绝不会写入该变更。
+- `POST /api/v1/agent/chat/outcome` 可在 SSE 断线或页面刷新后查询同一审批的 `applying`、已应用/验证、拒绝或失败终态。审批由服务端后台持有并通过 SQLite CAS 保证至多启动一次；客户端断开不会取消已经开始的写入和验证，也不会通过重试重复应用 Patch。
 - 恢复状态由 Python Engine 的 SQLite checkpoint 与服务端提案库共同提供；同一 metadata 目录下重启 Engine 可以继续原审批。多实例部署仍需要共享数据库与分布式锁，当前版本不支持。
 
 ## License

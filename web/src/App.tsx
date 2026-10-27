@@ -1,7 +1,14 @@
 // @author lxy
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { getPendingApprovals, streamChat, streamResume } from "./api/chat";
+import {
+  getApprovalOutcome,
+  getPendingApprovals,
+  parseApprovalOutcomeResponse,
+  streamChat,
+  streamResume,
+  type ApprovalOutcomeResponse,
+} from "./api/chat";
 import type { AgentEvent } from "./api/sse";
 import { ApprovalCard, type Approval } from "./components/ApprovalCard";
 import { CitationList, type Citation } from "./components/CitationList";
@@ -28,10 +35,17 @@ import {
   saveWorkspaceSession,
 } from "./state/workspaceSessions";
 
-type RunStatus = "idle" | "recovering" | "recovery_failed" | "connecting" | "streaming" | "awaiting_approval" | "resuming" | "completed" | "failed" | "cancelled";
+type RunStatus = "idle" | "recovering" | "recovery_failed" | "connecting" | "streaming"
+  | "awaiting_approval" | "resuming" | "applying" | "completed" | "failed" | "cancelled";
 type Message = { id: string; role: "user" | "assistant"; content: string; citations?: Citation[] };
 type ToolActivity = { id: string; name: string; status: string };
 type TerminalStatus = "completed" | "failed" | "awaiting_approval";
+type ActiveApproval = {
+  approval: Approval;
+  workspaceId: string;
+  sessionId: string;
+  approved: boolean;
+};
 type ScanSummary = {
   repository?: string;
   languages?: string[];
@@ -67,6 +81,8 @@ export function App() {
   const recoveryAbortRef = useRef<AbortController | null>(null);
   const activationAbortRef = useRef<AbortController | null>(null);
   const scanAbortRef = useRef<AbortController | null>(null);
+  const outcomeAbortRef = useRef(new Map<string, AbortController>());
+  const outcomeTimerRef = useRef(new Map<string, number>());
   const generationRef = useRef(0);
   const recoveryGenerationRef = useRef(0);
   const activationGenerationRef = useRef(0);
@@ -76,8 +92,13 @@ export function App() {
     generation: 0,
     status: null,
   });
+  const streamedOutcomeRef = useRef<{ generation: number; outcome: ApprovalOutcomeResponse | null }>({
+    generation: 0,
+    outcome: null,
+  });
   const sessionIdsRef = useRef(new Map<string, string>());
   const approvalSubmissionsRef = useRef(new Set<string>());
+  const activeApprovalRef = useRef<ActiveApproval | null>(null);
   const pendingCitationsRef = useRef(new Map<string, Citation[]>());
   const compactLayout = useMediaQuery("(max-width: 900px)");
   const knowledgeIndex = useKnowledgeIndex(workspaceId);
@@ -98,6 +119,7 @@ export function App() {
       abortRef.current?.abort();
       recoveryAbortRef.current?.abort();
       activationAbortRef.current?.abort();
+      cancelOutcomeQueries();
       scanGenerationRef.current += 1;
       scanAbortRef.current?.abort();
       pendingCitationsRef.current.clear();
@@ -183,10 +205,31 @@ export function App() {
         || (response.status === "awaiting_approval" && response.approvals.length === 0)) {
         throw new Error("Pending approval response is incomplete");
       }
+      if (response.outcomes !== undefined && !Array.isArray(response.outcomes)) {
+        throw new Error("Pending approval response outcomes are invalid");
+      }
+      const outcomes = (response.outcomes ?? []).map((outcome) =>
+        parseApprovalOutcomeResponse(outcome, {
+          workspaceId: targetWorkspaceId,
+          sessionId,
+          approvalId: stringValue(asRecord(outcome).approval_id) ?? "",
+        }));
       const restored = response.approvals.map((item) => restoredApprovalFromRecord(asRecord(item)));
       setApprovals(response.status === "awaiting_approval" ? restored : []);
       setStatus(response.status === "awaiting_approval" ? "awaiting_approval" : "idle");
       setNotice(response.status === "awaiting_approval" ? "已恢复上次待审批任务。" : "");
+      outcomes.forEach((outcome) => {
+        applyApprovalOutcome(outcome, undefined, !outcome.terminal);
+        if (!outcome.terminal) {
+          const approval = approvalFromOutcome(outcome);
+          void recoverApprovalOutcome({
+            approval,
+            workspaceId: targetWorkspaceId,
+            sessionId,
+            approved: true,
+          });
+        }
+      });
     } catch (error) {
       if (controller.signal.aborted || recoveryGeneration !== recoveryGenerationRef.current) return;
       setStatus("recovery_failed");
@@ -198,7 +241,9 @@ export function App() {
 
   async function chooseWorkspace(nextId: string) {
     if (nextId === workspaceId) return;
-    stopRun("cancelled");
+    stopRun("cancelled", false);
+    cancelOutcomeQueries();
+    activeApprovalRef.current = null;
     activationAbortRef.current?.abort();
     scanGenerationRef.current += 1;
     scanAbortRef.current?.abort();
@@ -228,7 +273,9 @@ export function App() {
 
   async function removeWorkspace(id: string) {
     if (!window.confirm("删除这个 Workspace 注册信息？本地代码不会被删除。")) return;
-    stopRun("cancelled");
+    stopRun("cancelled", false);
+    cancelOutcomeQueries();
+    activeApprovalRef.current = null;
     try {
       await deleteWorkspace(id);
       activationAbortRef.current?.abort();
@@ -287,6 +334,7 @@ export function App() {
     abortRef.current = controller;
     const generation = ++generationRef.current;
     terminalRef.current = { generation, status: null };
+    streamedOutcomeRef.current = { generation, outcome: null };
     const assistantId = makeId();
     const sessionId = sessionIdsRef.current.get(workspaceId) ?? makeId();
     sessionIdsRef.current.set(workspaceId, sessionId);
@@ -384,6 +432,20 @@ export function App() {
       const approval = approvalFromRecord(data);
       const approvalId = approval.id;
       setApprovals((items) => [...items.filter((item) => item.id !== approvalId), approval]);
+    } else if (event.event === "outcome") {
+      const active = activeApprovalRef.current;
+      if (!active
+        || active.workspaceId !== workspaceIdRef.current
+        || sessionIdsRef.current.get(active.workspaceId) !== active.sessionId) {
+        throw new Error("Approval outcome event has no active approval scope");
+      }
+      const outcome = parseApprovalOutcomeResponse(data, {
+        workspaceId: active.workspaceId,
+        sessionId: active.sessionId,
+        approvalId: active.approval.id,
+      });
+      streamedOutcomeRef.current = { generation, outcome };
+      applyApprovalOutcome(outcome, active.approval);
     } else if (event.event === "error") {
       pendingCitationsRef.current.delete(assistantId);
       terminalRef.current = { generation, status: "failed" };
@@ -395,7 +457,8 @@ export function App() {
         : data.status === "awaiting_approval" ? "awaiting_approval" : "completed";
       terminalRef.current = { generation, status: terminalStatus };
       if (terminalStatus === "failed") pendingCitationsRef.current.delete(assistantId);
-      setStatus(terminalStatus);
+      if (streamedOutcomeRef.current.generation !== generation
+        || !streamedOutcomeRef.current.outcome) setStatus(terminalStatus);
     }
   }
 
@@ -427,11 +490,13 @@ export function App() {
     const sessionId = sessionIdsRef.current.get(workspaceId);
     if (!sessionId) return;
     approvalSubmissionsRef.current.add(approval.id);
+    activeApprovalRef.current = { approval, workspaceId, sessionId, approved };
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     const generation = ++generationRef.current;
     terminalRef.current = { generation, status: null };
+    streamedOutcomeRef.current = { generation, outcome: null };
     const existingAssistant = [...messages].reverse().find((message) => message.role === "assistant");
     const assistantId = existingAssistant?.id ?? makeId();
     if (!existingAssistant) {
@@ -452,41 +517,167 @@ export function App() {
       }, (event) => handleAgentEvent(event, generation, assistantId), { signal: controller.signal });
       if (generation !== generationRef.current) return;
       const terminal = terminalRef.current;
-      if (terminal.generation !== generation || !terminal.status) {
+      if (terminal.generation !== generation || !terminal.status || terminal.status === "failed") {
         pendingCitationsRef.current.delete(assistantId);
-        setStatus("failed");
-        setNotice("连接在完成事件前中断，请重试本轮任务。");
-        setApprovals((items) => items.map((item) => item.id === approval.id
-          ? { ...item, status: "failed" } : item));
+        void recoverApprovalOutcome({ approval, workspaceId, sessionId, approved });
+        return;
+      }
+      const streamedOutcome = streamedOutcomeRef.current.generation === generation
+        ? streamedOutcomeRef.current.outcome : null;
+      if (streamedOutcome) {
+        if (streamedOutcome.terminal) activeApprovalRef.current = null;
+        else void recoverApprovalOutcome({ approval, workspaceId, sessionId, approved });
         return;
       }
       setApprovals((items) => items.map((item) => item.id === approval.id
         ? { ...item, status: terminal.status === "failed"
           ? "failed" : approved ? "approved" : "rejected" } : item));
+      activeApprovalRef.current = null;
     } catch (error) {
       if (generation !== generationRef.current) return;
       pendingCitationsRef.current.delete(assistantId);
-      setStatus(isAbort(error) ? "cancelled" : "failed");
-      if (!isAbort(error)) setNotice("审批提交失败，请检查服务状态后重试。");
-      setApprovals((items) => items.map((item) => item.id === approval.id
-        ? { ...item, status: "failed" } : item));
+      void recoverApprovalOutcome({ approval, workspaceId, sessionId, approved });
     } finally {
       approvalSubmissionsRef.current.delete(approval.id);
     }
   }
 
-  function stopRun(nextStatus: RunStatus = "cancelled") {
+  async function recoverApprovalOutcome(context: ActiveApproval) {
+    const { approval, workspaceId: outcomeWorkspaceId, sessionId } = context;
+    activeApprovalRef.current = context;
+    const key = `${outcomeWorkspaceId}:${sessionId}:${approval.id}`;
+    outcomeAbortRef.current.get(key)?.abort();
+    const priorTimer = outcomeTimerRef.current.get(key);
+    if (priorTimer !== undefined) window.clearTimeout(priorTimer);
+    const controller = new AbortController();
+    outcomeAbortRef.current.set(key, controller);
+    setApprovals((items) => items.map((item) => item.id === approval.id
+      ? { ...item, status: "applying" } : item));
+    setStatus("applying");
+    setNotice("小瑶正在执行，断线后仍会继续");
+    try {
+      const outcome = await getApprovalOutcome({
+        workspaceId: outcomeWorkspaceId,
+        sessionId,
+        approvalId: approval.id,
+      }, { signal: controller.signal });
+      if (controller.signal.aborted
+        || outcomeAbortRef.current.get(key) !== controller
+        || workspaceIdRef.current !== outcomeWorkspaceId
+        || sessionIdsRef.current.get(outcomeWorkspaceId) !== sessionId) return;
+      if (outcome.workspace_id !== outcomeWorkspaceId
+        || outcome.session_id !== sessionId
+        || outcome.approval_id !== approval.id) {
+        throw new Error("Approval outcome identity mismatch");
+      }
+      applyApprovalOutcome(outcome, approval);
+      if (!outcome.terminal) {
+        const timer = window.setTimeout(() => {
+          outcomeTimerRef.current.delete(key);
+          void recoverApprovalOutcome(context);
+        }, 1500);
+        outcomeTimerRef.current.set(key, timer);
+      } else {
+        activeApprovalRef.current = null;
+      }
+    } catch (error) {
+      if (controller.signal.aborted || isAbort(error)) return;
+      setApprovals((items) => items.map((item) => item.id === approval.id
+        ? { ...item, status: "outcome_unknown" } : item));
+      setStatus("recovery_failed");
+      setNotice("无法确认执行结果；为避免重复应用，已锁定本次审批。请重新检查。");
+      activeApprovalRef.current = null;
+    } finally {
+      if (outcomeAbortRef.current.get(key) === controller) outcomeAbortRef.current.delete(key);
+    }
+  }
+
+  function applyApprovalOutcome(
+    outcome: ApprovalOutcomeResponse,
+    existing?: Approval,
+    updateRunState = true,
+  ) {
+    const approvalStatus = approvalStatusFromOutcome(outcome.status);
+    setApprovals((items) => {
+      const current = items.find((item) => item.id === outcome.approval_id);
+      const base = current ?? existing ?? approvalFromOutcome(outcome);
+      return [...items.filter((item) => item.id !== outcome.approval_id), {
+        ...base,
+        status: approvalStatus,
+      }];
+    });
+    if (outcome.mutation) {
+      const mutation = outcome.mutation;
+      const change: FileChange = {
+        id: mutation.proposal_id,
+        workspaceId: mutation.workspace_id,
+        virtualPath: mutation.virtual_path,
+        operation: mutation.operation,
+        beforeSha256: mutation.before_sha256 ?? undefined,
+        afterSha256: mutation.after_sha256,
+      };
+      setFileChanges((items) => [...items.filter((item) => item.id !== change.id), change]);
+    }
+    if (outcome.validation) {
+      const validation = outcome.validation;
+      const result: VerificationResult = {
+        id: `outcome-${outcome.approval_id}`,
+        toolCallId: outcome.approval_id,
+        profile: validation.profile,
+        status: validation.status,
+        exitCode: validation.exit_code,
+        truncated: validation.truncated,
+      };
+      setVerifications((items) => [...items.filter((item) => item.id !== result.id), result]);
+    }
+    if (!updateRunState) return;
+    if (outcome.status === "applying") {
+      setStatus("applying");
+      setNotice("小瑶正在执行，断线后仍会继续");
+    } else if (outcome.status === "rejected") {
+      setStatus("completed");
+      setNotice("本次修改已拒绝。");
+    } else if (outcome.status === "failed") {
+      setStatus("failed");
+      setNotice("受控修改执行失败，没有重复提交审批。");
+    } else if (outcome.status === "recovery_required") {
+      setStatus("recovery_failed");
+      setNotice("上次写入结果无法自动确认，需要人工核对；请勿直接重试。");
+    } else if (outcome.status === "applied_and_tests_passed"
+      || outcome.status === "applied_recovered") {
+      setStatus("completed");
+      setNotice(outcome.status === "applied_and_tests_passed"
+        ? "修改已应用，验证通过。" : "已恢复确认：修改已经应用。");
+    } else {
+      setStatus("failed");
+      setNotice("修改已经应用，但验证未通过；请查看验证结果。");
+    }
+  }
+
+  function cancelOutcomeQueries() {
+    outcomeAbortRef.current.forEach((controller) => controller.abort());
+    outcomeAbortRef.current.clear();
+    outcomeTimerRef.current.forEach((timer) => window.clearTimeout(timer));
+    outcomeTimerRef.current.clear();
+  }
+
+  function stopRun(nextStatus: RunStatus = "cancelled", recoverApproval = true) {
+    const activeApproval = activeApprovalRef.current;
     generationRef.current += 1;
     pendingCitationsRef.current.clear();
     abortRef.current?.abort();
     abortRef.current = null;
+    if (recoverApproval && activeApproval) {
+      void recoverApprovalOutcome(activeApproval);
+      return;
+    }
     setStatus((current) => current === "connecting" || current === "streaming" || current === "resuming"
       ? nextStatus : current);
   }
 
   const busy = status === "connecting" || status === "streaming" || status === "resuming";
   const composerLocked = busy || status === "awaiting_approval"
-    || status === "recovering" || status === "recovery_failed";
+    || status === "applying" || status === "recovering" || status === "recovery_failed";
 
   return (
     <div className="app-shell">
@@ -919,6 +1110,28 @@ function approvalFromRecord(data: Record<string, unknown>): Approval {
   };
 }
 
+function approvalFromOutcome(outcome: ApprovalOutcomeResponse): Approval {
+  return {
+    id: outcome.approval_id,
+    action: "apply_workspace_change",
+    message: "已恢复受控修改执行结果",
+    virtualPath: outcome.mutation?.virtual_path,
+    operation: outcome.mutation?.operation,
+    validationProfile: outcome.validation?.profile,
+    status: approvalStatusFromOutcome(outcome.status),
+  };
+}
+
+function approvalStatusFromOutcome(status: ApprovalOutcomeResponse["status"]): Approval["status"] {
+  if (status === "applying") return "applying";
+  if (status === "rejected") return "rejected";
+  if (status === "failed") return "failed";
+  if (status === "recovery_required") return "recovery_required";
+  if (status === "applied_recovered") return "applied";
+  if (status === "applied_and_tests_passed") return "verified";
+  return "verification_failed";
+}
+
 function restoredApprovalFromRecord(data: Record<string, unknown>): Approval {
   const payload = asRecord(data.payload);
   const operation = stringValue(payload.operation);
@@ -975,7 +1188,7 @@ function statusLabel(status: RunStatus) {
   return ({
     idle: "等待指令", connecting: "连接引擎", streaming: "协作中",
     recovering: "恢复上次任务", recovery_failed: "等待重新检查",
-    awaiting_approval: "等待主人确认", resuming: "正在恢复任务",
+    awaiting_approval: "等待主人确认", resuming: "正在恢复任务", applying: "正在执行修改",
     completed: "本轮完成", failed: "需要处理", cancelled: "已停止",
   })[status];
 }

@@ -184,7 +184,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .rejection-form textarea { width: 100%; resize: vertical; border: 1px solid #46515a; background: #0b1015; color: var(--paper); padding: 10px 12px; line-height: 1.5; }
 .rejection-form .approval-actions { padding: 2px 0 18px; }
 .approval-approved { border-color: #315f50; box-shadow: inset 3px 0 0 var(--mint); }
+.approval-applying { border-color: #765b31; box-shadow: inset 3px 0 0 var(--amber); }
+.approval-applied, .approval-verified { border-color: #315f50; box-shadow: inset 3px 0 0 var(--mint); }
+.approval-verification_failed, .approval-recovery_required, .approval-outcome_unknown { border-color: #765b31; box-shadow: inset 3px 0 0 var(--amber); }
 .approval-rejected, .approval-failed { border-color: #6d3d36; box-shadow: inset 3px 0 0 var(--danger); }
+.approval-progress { margin: 0 18px 18px; padding: 10px 12px; border: 1px solid #614a2d; color: var(--amber-soft); font-size: 12px; }
 .result-card { margin: 12px 14px; border: 1px solid #303b43; background: #0e151b; }
 .result-heading { min-height: 64px; display: grid; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 10px; padding: 12px 14px; }
 .result-heading > div { min-width: 0; display: grid; gap: 5px; }

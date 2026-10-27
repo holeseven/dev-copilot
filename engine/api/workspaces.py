@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -12,6 +14,31 @@ from engine.core.workspace.change_service import ControlledChangeService
 
 
 router = APIRouter()
+
+
+def _approval_run_state(app) -> tuple[dict, asyncio.Lock]:
+    if not hasattr(app.state, "approval_runs"):
+        app.state.approval_runs = {}
+    if not hasattr(app.state, "approval_runs_lock"):
+        app.state.approval_runs_lock = asyncio.Lock()
+    return app.state.approval_runs, app.state.approval_runs_lock
+
+
+@asynccontextmanager
+async def workspace_lifecycle_guard(request: Request, workspace_id: str):
+    """Serialize workspace mutations with approval-run creation and cleanup."""
+
+    runs, lock = _approval_run_state(request.app)
+    async with lock:
+        if any(
+            isinstance(key, tuple) and key and key[0] == workspace_id
+            for key in runs
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="workspace has an active approval run",
+            )
+        yield
 
 
 class WorkspaceCreate(BaseModel):
@@ -105,11 +132,12 @@ async def get_workspace(workspace_id: str, request: Request) -> Workspace:
 
 @router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_workspace(workspace_id: str, request: Request) -> Response:
-    registry = request.app.state.workspace_registry
-    if registry.get(workspace_id) is None:
-        raise HTTPException(status_code=404, detail=f"workspace not found: {workspace_id}")
-    registry.delete(workspace_id)
-    await invalidate_workspace_manager(request, workspace_id)
+    async with workspace_lifecycle_guard(request, workspace_id):
+        registry = request.app.state.workspace_registry
+        if registry.get(workspace_id) is None:
+            raise HTTPException(status_code=404, detail=f"workspace not found: {workspace_id}")
+        registry.delete(workspace_id)
+        await invalidate_workspace_manager(request, workspace_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -121,19 +149,20 @@ async def delete_workspace(workspace_id: str, request: Request) -> Response:
 async def add_repository(
     workspace_id: str, payload: RepositoryCreate, request: Request
 ) -> Workspace:
-    registry = request.app.state.workspace_registry
-    if registry.get(workspace_id) is None:
-        raise HTTPException(status_code=404, detail=f"workspace not found: {workspace_id}")
-    try:
-        workspace = registry.add_repository(
-            workspace_id, payload.name, payload.local_path
-        )
-    except ValueError as exc:
-        detail = str(exc)
-        code = 409 if "name already exists" in detail else 422
-        raise HTTPException(status_code=code, detail=detail) from None
-    await invalidate_workspace_manager(request, workspace_id)
-    return workspace
+    async with workspace_lifecycle_guard(request, workspace_id):
+        registry = request.app.state.workspace_registry
+        if registry.get(workspace_id) is None:
+            raise HTTPException(status_code=404, detail=f"workspace not found: {workspace_id}")
+        try:
+            workspace = registry.add_repository(
+                workspace_id, payload.name, payload.local_path
+            )
+        except ValueError as exc:
+            detail = str(exc)
+            code = 409 if "name already exists" in detail else 422
+            raise HTTPException(status_code=code, detail=detail) from None
+        await invalidate_workspace_manager(request, workspace_id)
+        return workspace
 
 
 @router.post("/{workspace_id}/scan", response_model=List[RepositoryScan])

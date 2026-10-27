@@ -133,7 +133,7 @@ class PythonAgentClientTest {
             accept.set(exchange.getRequestHeaders().getFirst(HttpHeaders.ACCEPT));
             body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             send(exchange, 200, MediaType.APPLICATION_JSON_VALUE, """
-                    {"workspace_id":"workspace-1","session_id":"session-1","status":"awaiting_approval","approvals":[{"approval_id":"approval-1","action":"apply_workspace_change","message":"请确认修改","payload":{"tool_name":"apply_workspace_change","operation":"replace","workspace_id":"workspace-1","repository":"service","virtual_path":"service/app.py","diff":"--- a/app.py\\n+++ b/app.py","before_sha256":"before","after_sha256":"after","patch_sha256":"patch","validation_profile":"python_pytest"}}]}
+                    {"workspace_id":"workspace-1","session_id":"session-1","status":"awaiting_approval","approvals":[{"approval_id":"approval-1","action":"apply_workspace_change","message":"请确认修改","payload":{"tool_name":"apply_workspace_change","operation":"replace","workspace_id":"workspace-1","repository":"service","virtual_path":"service/app.py","diff":"--- a/app.py\\n+++ b/app.py","before_sha256":"before","after_sha256":"after","patch_sha256":"patch","validation_profile":"python_pytest"}}],"outcomes":[{"workspace_id":"workspace-1","session_id":"session-1","approval_id":"approval-2","status":"applying","terminal":false}]}
                     """);
         });
         PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
@@ -170,7 +170,51 @@ class PythonAgentClientTest {
                                 "python_pytest"
                         )
                 )
-        )));
+        ), response.outcomes()));
+        assertThat(response.outcomes()).singleElement().satisfies(outcome -> {
+            assertThat(outcome.approvalId()).isEqualTo("approval-2");
+            assertThat(outcome.status()).isEqualTo(AgentApprovalOutcomeStatus.APPLYING);
+        });
+    }
+
+    @Test
+    void rejectsPendingResponseWithMismatchedOuterScope() throws Exception {
+        startServer("/chat/pending", exchange -> send(
+                exchange,
+                200,
+                MediaType.APPLICATION_JSON_VALUE,
+                """
+                {"workspace_id":"other","session_id":"session-1","status":"idle","approvals":[]}
+                """
+        ));
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        assertThatThrownBy(() -> client.pendingApprovals(validPendingRequest())
+                .block(Duration.ofSeconds(3)))
+                .isInstanceOf(PythonAgentGatewayException.class)
+                .hasMessageContaining("作用域不匹配");
+    }
+
+    @Test
+    void rejectsPendingResponseWithMismatchedNestedScopes() throws Exception {
+        startServer("/chat/pending", exchange -> send(
+                exchange,
+                200,
+                MediaType.APPLICATION_JSON_VALUE,
+                """
+                {"workspace_id":"workspace-1","session_id":"session-1","status":"awaiting_approval",
+                 "approvals":[{"approval_id":"approval-1","action":"apply_workspace_change","message":"review",
+                   "payload":{"workspace_id":"other"}}],
+                 "outcomes":[{"workspace_id":"workspace-1","session_id":"other","approval_id":"approval-2",
+                   "status":"applying","terminal":false}]}
+                """
+        ));
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        assertThatThrownBy(() -> client.pendingApprovals(validPendingRequest())
+                .block(Duration.ofSeconds(3)))
+                .isInstanceOf(PythonAgentGatewayException.class)
+                .hasMessageContaining("作用域不匹配");
     }
 
     @Test
@@ -223,9 +267,85 @@ class PythonAgentClientTest {
     }
 
     @Test
+    void postsOutcomeRequestAndDecodesOnlyTheStrictTypedContract() throws Exception {
+        AtomicReference<String> method = new AtomicReference<>();
+        AtomicReference<String> path = new AtomicReference<>();
+        AtomicReference<String> body = new AtomicReference<>();
+        startServer("/chat/outcome", exchange -> {
+            method.set(exchange.getRequestMethod());
+            path.set(exchange.getRequestURI().getPath());
+            body.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            send(exchange, 200, MediaType.APPLICATION_JSON_VALUE, """
+                    {"workspace_id":"workspace-1","session_id":"session-1","approval_id":"approval-1","status":"applied_and_tests_passed","terminal":true,"mutation":{"proposal_id":"approval-1","workspace_id":"workspace-1","virtual_path":"service/app.py","operation":"replace","before_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","after_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"validation":{"status":"passed","exit_code":0,"truncated":false,"profile":"python_pytest"}}
+                    """);
+        });
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        AgentApprovalOutcomeResponse response = client.approvalOutcome(validOutcomeRequest())
+                .block(Duration.ofSeconds(3));
+
+        assertThat(method.get()).isEqualTo("POST");
+        assertThat(path.get()).isEqualTo("/chat/outcome");
+        assertThat(objectMapper.readTree(body.get())).isEqualTo(objectMapper.readTree("""
+                {"session_id":"session-1","workspace_id":"workspace-1","approval_id":"approval-1"}
+                """));
+        assertThat(response.status()).isEqualTo(AgentApprovalOutcomeStatus.APPLIED_AND_TESTS_PASSED);
+        assertThat(response.validation().status()).isEqualTo("passed");
+        assertThat(objectMapper.writeValueAsString(response)).doesNotContain("stdout");
+    }
+
+    @Test
+    void outcomeRejectsUnknownInternalFieldsWithoutLeakingThem() throws Exception {
+        startServer("/chat/outcome", exchange -> send(exchange, 200, MediaType.APPLICATION_JSON_VALUE, """
+                {"workspace_id":"workspace-1","session_id":"session-1","approval_id":"approval-1","status":"failed","terminal":true,"mutation":{"proposal_id":"approval-1","workspace_id":"workspace-1","virtual_path":"service/app.py","operation":"replace","before_sha256":"before","after_sha256":"after","host_path":"C:/secret/source.py"}}
+                """));
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        assertThatThrownBy(() -> client.approvalOutcome(validOutcomeRequest())
+                .block(Duration.ofSeconds(3)))
+                .isInstanceOf(PythonAgentGatewayException.class)
+                .hasMessage("读取 Python Agent 审批结果失败")
+                .hasMessageNotContaining("host_path")
+                .hasMessageNotContaining("C:/secret/source.py");
+    }
+
+    @Test
+    void outcomeHttpErrorsDoNotExposeUpstreamBody() throws Exception {
+        startServer("/chat/outcome", exchange -> send(exchange, 409, MediaType.APPLICATION_JSON_VALUE,
+                "{\"detail\":\"secret approval state\"}"));
+        PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
+
+        assertThatThrownBy(() -> client.approvalOutcome(validOutcomeRequest())
+                .block(Duration.ofSeconds(3)))
+                .isInstanceOf(PythonAgentGatewayException.class)
+                .hasMessageContaining("409")
+                .hasMessageNotContaining("secret approval state");
+    }
+
+    @Test
+    void outcomeCancellationCancelsUpstreamResponseBody() {
+        AtomicBoolean cancelled = new AtomicBoolean();
+        Flux<org.springframework.core.io.buffer.DataBuffer> responseBody =
+                Flux.<org.springframework.core.io.buffer.DataBuffer>never()
+                        .doOnCancel(() -> cancelled.set(true));
+        WebClient webClient = WebClient.builder()
+                .exchangeFunction(request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+                        .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                        .body(responseBody)
+                        .build()))
+                .build();
+        PythonAgentClient client = new PythonAgentClient(webClient);
+
+        var subscription = client.approvalOutcome(validOutcomeRequest()).subscribe();
+        subscription.dispose();
+
+        assertThat(cancelled).isTrue();
+    }
+
+    @Test
     void ignoresUnknownPendingApprovalFieldsInsteadOfForwardingThem() throws Exception {
         startServer("/chat/pending", exchange -> send(exchange, 200, MediaType.APPLICATION_JSON_VALUE, """
-                {"workspace_id":"workspace-1","session_id":"session-1","status":"awaiting_approval","internal_thread_id":"must-not-forward","approvals":[{"approval_id":"approval-1","action":"write_file","message":"review","details":"internal","payload":{"virtual_path":"app.py","new_content":"secret source"}}]}
+                {"workspace_id":"workspace-1","session_id":"session-1","status":"awaiting_approval","internal_thread_id":"must-not-forward","approvals":[{"approval_id":"approval-1","action":"write_file","message":"review","details":"internal","payload":{"workspace_id":"workspace-1","virtual_path":"app.py","new_content":"secret source"}}]}
                 """));
         PythonAgentClient client = new PythonAgentClient(WebClient.builder(), baseUrl());
 
@@ -327,6 +447,10 @@ class PythonAgentClientTest {
 
     private AgentPendingApprovalRequest validPendingRequest() {
         return new AgentPendingApprovalRequest("session-1", "workspace-1");
+    }
+
+    private AgentApprovalOutcomeRequest validOutcomeRequest() {
+        return new AgentApprovalOutcomeRequest("session-1", "workspace-1", "approval-1");
     }
 
     private void startServer(ExchangeHandler handler) throws IOException {

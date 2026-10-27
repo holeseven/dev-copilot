@@ -77,12 +77,26 @@ async def _runtime_lifespan(app: FastAPI, settings, checkpointer):
         path_guard=app.state.workspace_registry.path_guard
     )
     app.state.proposal_store = SqliteProposalStore(settings.resolved_proposal_db_path)
+    recovered_outcomes = []
+    for workspace in app.state.workspace_registry.list():
+        recovered_outcomes.extend(
+            app.state.proposal_store.reconcile_applying(
+                workspace, app.state.workspace_registry.path_guard
+            )
+        )
+    if recovered_outcomes:
+        logger.warning(
+            "Reconciled interrupted approval outcomes | count={}",
+            len(recovered_outcomes),
+        )
     app.state.rag_service = RagService(
         RagStore(settings.resolved_rag_db_path),
         app.state.workspace_registry.path_guard,
     )
     app.state.agent_graph = build_agent_graph(checkpointer=checkpointer)
     app.state.approval_coordinator = ApprovalCoordinator()
+    app.state.approval_runs = {}
+    app.state.approval_runs_lock = asyncio.Lock()
     app.state.dispatcher = get_agent_dispatcher()
     app.state.mcp_managers = {}
     app.state.workspace_manager_lock = asyncio.Lock()
@@ -96,6 +110,16 @@ async def _runtime_lifespan(app: FastAPI, settings, checkpointer):
     finally:
         # 关闭阶段：逆序释放资源
         logger.info("正在关闭 {} ...", settings.app_name)
+        approval_tasks = [
+            run.task
+            for run in app.state.approval_runs.values()
+            if run.task is not None and not run.task.done()
+        ]
+        for task in approval_tasks:
+            task.cancel()
+        if approval_tasks:
+            await asyncio.gather(*approval_tasks, return_exceptions=True)
+        app.state.approval_runs.clear()
         async with app.state.workspace_manager_lock:
             managers = list(app.state.mcp_managers.items())
             app.state.mcp_managers.clear()

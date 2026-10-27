@@ -3,14 +3,21 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
-import { getPendingApprovals, streamChat, streamResume } from "./api/chat";
+import { getApprovalOutcome, getPendingApprovals, streamChat, streamResume } from "./api/chat";
 import { getKnowledgeIndex, rebuildKnowledgeIndex } from "./api/rag";
 import { activateWorkspace, deleteWorkspace, listWorkspaces, scanWorkspace } from "./api/workspaces";
 import { loadWorkspaceSession, saveWorkspaceSession } from "./state/workspaceSessions";
 
-vi.mock("./api/chat", () => ({
-  getPendingApprovals: vi.fn(), streamChat: vi.fn(), streamResume: vi.fn(),
-}));
+vi.mock("./api/chat", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api/chat")>();
+  return {
+    ...actual,
+    getApprovalOutcome: vi.fn(),
+    getPendingApprovals: vi.fn(),
+    streamChat: vi.fn(),
+    streamResume: vi.fn(),
+  };
+});
 vi.mock("./api/workspaces", () => ({
   listWorkspaces: vi.fn(),
   createWorkspace: vi.fn(),
@@ -510,6 +517,356 @@ describe("小瑶开发助手工作台", () => {
     expect(screen.getByText("正在恢复任务…")).toBeInTheDocument();
   });
 
+  it.each([
+    ["applied_and_tests_passed", "passed", "已应用并验证", "验证通过"],
+    ["applied_tests_failed", "failed", "已应用，验证未通过", "验证失败"],
+  ] as const)("renders a normal resume SSE outcome for %s without generic approval overwrite", async (
+    outcomeStatus, validationStatus, approvalLabel, verificationLabel,
+  ) => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-sse-outcome", action: "apply_workspace_change",
+        message: "应用受控修改", payload: {
+          virtual_path: "src/sse-outcome.py", diff: "+safe", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockImplementation(async (request, onEvent) => {
+      await onEvent({ event: "outcome", data: {
+        workspace_id: request.workspaceId, session_id: request.sessionId,
+        approval_id: request.approvalId, status: outcomeStatus, terminal: true,
+        mutation: {
+          proposal_id: request.approvalId, workspace_id: request.workspaceId,
+          virtual_path: "src/sse-outcome.py", operation: "replace",
+          before_sha256: "a".repeat(64), after_sha256: "b".repeat(64),
+        },
+        validation: {
+          profile: "python_pytest", status: validationStatus,
+          exit_code: validationStatus === "passed" ? 0 : 1, truncated: false,
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText(/告诉小瑶/), { target: { value: "正常 outcome" } });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "批准并执行" }));
+
+    expect(await screen.findByText(approvalLabel)).toBeInTheDocument();
+    expect(screen.getByText(verificationLabel)).toBeInTheDocument();
+    expect(getApprovalOutcome).not.toHaveBeenCalled();
+    expect(screen.queryByText("已批准")).not.toBeInTheDocument();
+  });
+
+  it("fails closed for a normal resume SSE outcome with malicious identity", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-sse-evil", action: "apply_workspace_change",
+        message: "应用受控修改", payload: {
+          virtual_path: "src/safe-sse.py", diff: "+safe", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockImplementation(async (request, onEvent) => {
+      await onEvent({ event: "outcome", data: {
+        workspace_id: "evil", session_id: request.sessionId,
+        approval_id: request.approvalId, status: "applied_recovered", terminal: true,
+        mutation: {
+          proposal_id: request.approvalId, workspace_id: "evil",
+          virtual_path: "src/evil-sse.py", operation: "replace",
+          before_sha256: null, after_sha256: "e".repeat(64),
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+    vi.mocked(getApprovalOutcome).mockRejectedValue(new Error("outcome unavailable"));
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText(/告诉小瑶/), { target: { value: "恶意 SSE outcome" } });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "批准并执行" }));
+
+    expect(await screen.findByText("无法确认执行结果")).toBeInTheDocument();
+    expect(screen.queryByText("src/evil-sse.py")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准并执行" })).not.toBeInTheDocument();
+  });
+
+  it("recovers an applying outcome after the approval stream disconnects", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-applying", action: "apply_workspace_change",
+        message: "应用受控修改", payload: {
+          virtual_path: "src/app.py", diff: "+safe", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockRejectedValue(new Error("stream disconnected"));
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText(/告诉小瑶/), { target: { value: "修改应用" } });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    await screen.findByRole("button", { name: "批准并执行" });
+    const sessionId = vi.mocked(streamChat).mock.calls[0][0].sessionId;
+    vi.mocked(getApprovalOutcome).mockImplementation(async (request) => ({
+      workspace_id: request.workspaceId, session_id: sessionId,
+      approval_id: request.approvalId, status: "applying", terminal: false,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "批准并执行" }));
+
+    expect(await screen.findByText("正在执行")).toBeInTheDocument();
+    expect(screen.getAllByText("小瑶正在执行，断线后仍会继续")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "批准并执行" })).not.toBeInTheDocument();
+    expect(getApprovalOutcome).toHaveBeenCalledWith(expect.objectContaining({
+      approvalId: "approval-applying", sessionId,
+    }), expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it.each([
+    ["applied_and_tests_passed", "passed", "已应用并验证", "验证通过"],
+    ["applied_tests_failed", "failed", "已应用，验证未通过", "验证失败"],
+  ] as const)("renders recovered %s outcome in the existing result ledger", async (
+    outcomeStatus, validationStatus, approvalLabel, verificationLabel,
+  ) => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-result", action: "apply_workspace_change",
+        message: "应用受控修改", payload: {
+          virtual_path: "src/result.py", diff: "+safe", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockRejectedValue(new Error("stream disconnected"));
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText(/告诉小瑶/), { target: { value: "修改结果" } });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    await screen.findByRole("button", { name: "批准并执行" });
+    const sessionId = vi.mocked(streamChat).mock.calls[0][0].sessionId;
+    vi.mocked(getApprovalOutcome).mockResolvedValue({
+      workspace_id: "local-dev", session_id: sessionId,
+      approval_id: "approval-result", status: outcomeStatus, terminal: true,
+      mutation: {
+        proposal_id: "approval-result", workspace_id: "local-dev",
+        virtual_path: "src/result.py", operation: "replace",
+        before_sha256: "a".repeat(64), after_sha256: "b".repeat(64),
+      },
+      validation: {
+        profile: "python_pytest", status: validationStatus,
+        exit_code: validationStatus === "passed" ? 0 : 1, truncated: false,
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "批准并执行" }));
+
+    expect(await screen.findByText(approvalLabel)).toBeInTheDocument();
+    expect(screen.getAllByText("src/result.py").length).toBeGreaterThan(0);
+    expect(screen.getByText(verificationLabel)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准并执行" })).not.toBeInTheDocument();
+  });
+
+  it("uses the authoritative outcome after an explicit resume stream failure", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-stream-error", action: "apply_workspace_change",
+        message: "应用受控修改", payload: {
+          virtual_path: "src/stream-error.py", diff: "+safe", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "error", data: { code: "upstream_unavailable" } });
+      await onEvent({ event: "done", data: { status: "failed" } });
+    });
+    vi.mocked(getApprovalOutcome).mockImplementation(async (request) => ({
+      workspace_id: request.workspaceId, session_id: request.sessionId,
+      approval_id: request.approvalId, status: "applied_recovered", terminal: true,
+      mutation: {
+        proposal_id: request.approvalId, workspace_id: request.workspaceId,
+        virtual_path: "src/stream-error.py", operation: "replace",
+        before_sha256: "a".repeat(64), after_sha256: "b".repeat(64),
+      },
+    }));
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText(/告诉小瑶/), { target: { value: "处理流失败" } });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "批准并执行" }));
+
+    expect(await screen.findByText("已应用")).toBeInTheDocument();
+    expect(screen.getAllByText("src/stream-error.py").length).toBeGreaterThan(0);
+    expect(getApprovalOutcome).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an approval locked and recovers its outcome when Stop interrupts resume", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-stop", action: "apply_workspace_change",
+        message: "应用受控修改", payload: {
+          virtual_path: "src/stop.py", diff: "+safe", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockReturnValue(new Promise(() => undefined));
+    vi.mocked(getApprovalOutcome).mockImplementation(async (request) => ({
+      workspace_id: request.workspaceId, session_id: request.sessionId,
+      approval_id: request.approvalId, status: "applying", terminal: false,
+    }));
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText(/告诉小瑶/), { target: { value: "停止恢复" } });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "批准并执行" }));
+    fireEvent.click(await screen.findByRole("button", { name: "停止" }));
+
+    expect(await screen.findByText("正在执行")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准并执行" })).not.toBeInTheDocument();
+    expect(getApprovalOutcome).toHaveBeenCalledOnce();
+  });
+
+  it("restores terminal pending outcomes on page load", async () => {
+    saveWorkspaceSession("local-dev", "persisted-session");
+    vi.mocked(getPendingApprovals).mockResolvedValue({
+      workspace_id: "local-dev", session_id: "persisted-session",
+      status: "idle", approvals: [],
+      outcomes: [{
+        workspace_id: "local-dev", session_id: "persisted-session",
+        approval_id: "approval-restored", status: "applied_recovered", terminal: true,
+        mutation: {
+          proposal_id: "approval-restored", workspace_id: "local-dev",
+          virtual_path: "src/restored-result.py", operation: "create",
+          before_sha256: null, after_sha256: "c".repeat(64),
+        },
+      }],
+    });
+
+    render(<App />);
+
+    expect((await screen.findAllByText("src/restored-result.py")).length).toBeGreaterThan(0);
+    expect(screen.getByText("已应用")).toBeInTheDocument();
+  });
+
+  it("continues recovering a non-terminal pending outcome after refresh", async () => {
+    saveWorkspaceSession("local-dev", "persisted-applying-session");
+    vi.mocked(getPendingApprovals).mockResolvedValue({
+      workspace_id: "local-dev", session_id: "persisted-applying-session",
+      status: "idle", approvals: [],
+      outcomes: [{
+        workspace_id: "local-dev", session_id: "persisted-applying-session",
+        approval_id: "approval-refresh-applying", status: "applying", terminal: false,
+      }],
+    });
+    vi.mocked(getApprovalOutcome).mockResolvedValue({
+      workspace_id: "local-dev", session_id: "persisted-applying-session",
+      approval_id: "approval-refresh-applying", status: "applied_recovered", terminal: true,
+      mutation: {
+        proposal_id: "approval-refresh-applying", workspace_id: "local-dev",
+        virtual_path: "src/refreshed.py", operation: "replace",
+        before_sha256: "d".repeat(64), after_sha256: "e".repeat(64),
+      },
+    });
+
+    render(<App />);
+
+    expect((await screen.findAllByText("src/refreshed.py")).length).toBeGreaterThan(0);
+    expect(getApprovalOutcome).toHaveBeenCalledWith({
+      workspaceId: "local-dev",
+      sessionId: "persisted-applying-session",
+      approvalId: "approval-refresh-applying",
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  });
+
+  it("aborts and ignores a stale approval outcome after switching workspaces", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace, { id: "other", name: "另一个项目", repositories: [] },
+    ]);
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-stale", action: "apply_workspace_change",
+        message: "应用受控修改", payload: {
+          virtual_path: "src/stale.py", diff: "+safe", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockRejectedValue(new Error("stream disconnected"));
+    let resolveOutcome!: (value: Awaited<ReturnType<typeof getApprovalOutcome>>) => void;
+    let outcomeSignal: AbortSignal | undefined;
+    vi.mocked(getApprovalOutcome).mockImplementation((_request, options) => {
+      outcomeSignal = options?.signal;
+      return new Promise((resolve) => { resolveOutcome = resolve; });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText(/告诉小瑶/), { target: { value: "修改后切换" } });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    await screen.findByRole("button", { name: "批准并执行" });
+    fireEvent.click(screen.getByRole("button", { name: "批准并执行" }));
+    await waitFor(() => expect(getApprovalOutcome).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: /另一个项目/ }));
+    expect(outcomeSignal?.aborted).toBe(true);
+    resolveOutcome({
+      workspace_id: "local-dev", session_id: "stale-session",
+      approval_id: "approval-stale", status: "applied_recovered", terminal: true,
+      mutation: {
+        proposal_id: "approval-stale", workspace_id: "local-dev",
+        virtual_path: "src/must-not-render.py", operation: "replace",
+        before_sha256: null, after_sha256: "d".repeat(64),
+      },
+    });
+
+    await waitFor(() => expect(screen.queryByText("src/must-not-render.py")).not.toBeInTheDocument());
+  });
+
+  it("fails closed when a mocked outcome identity does not match the active workspace", async () => {
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "approval_required", data: {
+        approval_id: "approval-evil", action: "apply_workspace_change",
+        message: "应用受控修改", payload: {
+          virtual_path: "src/safe.py", diff: "+safe", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "awaiting_approval" } });
+    });
+    vi.mocked(streamResume).mockRejectedValue(new Error("stream disconnected"));
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText(/告诉小瑶/), { target: { value: "恶意响应" } });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    await screen.findByRole("button", { name: "批准并执行" });
+    const sessionId = vi.mocked(streamChat).mock.calls[0][0].sessionId;
+    vi.mocked(getApprovalOutcome).mockResolvedValue({
+      workspace_id: "evil", session_id: sessionId, approval_id: "approval-evil",
+      status: "applied_recovered", terminal: true,
+      mutation: {
+        proposal_id: "approval-evil", workspace_id: "evil",
+        virtual_path: "src/evil.py", operation: "replace",
+        before_sha256: null, after_sha256: "e".repeat(64),
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "批准并执行" }));
+
+    expect(await screen.findByText("无法确认执行结果")).toBeInTheDocument();
+    expect(screen.queryByText("src/evil.py")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "批准并执行" })).not.toBeInTheDocument();
+  });
+
   it("merges concurrent tool events by tool_call_id instead of tool name", async () => {
     vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
       await onEvent({ event: "tool", data: { status: "start", tool_name: "read_file", tool_call_id: "a" } });
@@ -604,6 +961,41 @@ describe("小瑶开发助手工作台", () => {
       sessionId: "persisted-session",
       approvalId: "restored-approval",
     });
+  });
+
+  it("keeps a current pending approval authoritative over historical terminal outcomes", async () => {
+    saveWorkspaceSession("local-dev", "persisted-session");
+    vi.mocked(getPendingApprovals).mockResolvedValue({
+      workspace_id: "local-dev",
+      session_id: "persisted-session",
+      status: "awaiting_approval",
+      approvals: [{
+        approval_id: "current-approval",
+        action: "apply_workspace_change",
+        message: "当前待审批修改",
+        payload: {
+          virtual_path: "src/current.py", diff: "+current", operation: "replace",
+          validation_profile: "python_pytest",
+        },
+      }],
+      outcomes: [{
+        workspace_id: "local-dev", session_id: "persisted-session",
+        approval_id: "historical-outcome", status: "applied_recovered", terminal: true,
+        mutation: {
+          proposal_id: "historical-outcome", workspace_id: "local-dev",
+          virtual_path: "src/historical.py", operation: "replace",
+          before_sha256: "a".repeat(64), after_sha256: "b".repeat(64),
+        },
+      }],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("src/current.py")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "批准并执行" })).toBeInTheDocument();
+    expect(screen.getByText("等待主人确认")).toBeInTheDocument();
+    expect(screen.queryByText("本轮完成")).not.toBeInTheDocument();
+    expect(screen.getAllByText("src/historical.py").length).toBeGreaterThan(0);
   });
 
   it("fails closed when recovery fails and can retry", async () => {

@@ -1,6 +1,8 @@
 package com.agent.controller;
 
 import com.agent.client.AgentChatRequest;
+import com.agent.client.AgentApprovalOutcomeRequest;
+import com.agent.client.AgentApprovalOutcomeResponse;
 import com.agent.client.AgentPendingApprovalRequest;
 import com.agent.client.AgentPendingApprovalResponse;
 import com.agent.client.AgentResumeRequest;
@@ -57,6 +59,17 @@ public class AgentChatController {
             @Valid @RequestBody AgentPendingApprovalRequest request
     ) {
         return pythonAgentClient.pendingApprovals(request);
+    }
+
+    @PostMapping(
+            value = "/chat/outcome",
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public Mono<AgentApprovalOutcomeResponse> approvalOutcome(
+            @Valid @RequestBody AgentApprovalOutcomeRequest request
+    ) {
+        return pythonAgentClient.approvalOutcome(request);
     }
 
     private Flux<ServerSentEvent<String>> safelyStream(Flux<ServerSentEvent<String>> upstream) {

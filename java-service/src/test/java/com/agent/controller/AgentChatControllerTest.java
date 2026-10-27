@@ -2,6 +2,11 @@ package com.agent.controller;
 
 import com.agent.client.AgentChatRequest;
 import com.agent.client.AgentApprovalPayload;
+import com.agent.client.AgentApprovalOutcomeMutation;
+import com.agent.client.AgentApprovalOutcomeRequest;
+import com.agent.client.AgentApprovalOutcomeResponse;
+import com.agent.client.AgentApprovalOutcomeStatus;
+import com.agent.client.AgentApprovalOutcomeValidation;
 import com.agent.client.AgentPendingApproval;
 import com.agent.client.AgentPendingApprovalRequest;
 import com.agent.client.AgentPendingApprovalResponse;
@@ -100,7 +105,10 @@ class AgentChatControllerTest {
                                 "apply_workspace_change", "replace", "workspace-1", "service",
                                 "service/app.py", "diff", "before", "after", "patch", "python_pytest")
                 )
-        ));
+        ), List.of(new AgentApprovalOutcomeResponse(
+                "workspace-1", "session-1", "approval-2",
+                AgentApprovalOutcomeStatus.APPLYING, false, null, null
+        )));
         MockMvc mvc = standaloneSetup(new AgentChatController(client))
                 .setControllerAdvice(new ApiExceptionHandler())
                 .build();
@@ -122,7 +130,10 @@ class AgentChatControllerTest {
                 .andExpect(jsonPath("$.status").value("awaiting_approval"))
                 .andExpect(jsonPath("$.approvals[0].approval_id").value("approval-1"))
                 .andExpect(jsonPath("$.approvals[0].payload.virtual_path").value("service/app.py"))
-                .andExpect(jsonPath("$.approvals[0].payload.validation_profile").value("python_pytest"));
+                .andExpect(jsonPath("$.approvals[0].payload.validation_profile").value("python_pytest"))
+                .andExpect(jsonPath("$.outcomes[0].approval_id").value("approval-2"))
+                .andExpect(jsonPath("$.outcomes[0].status").value("applying"))
+                .andExpect(jsonPath("$.outcomes[0].terminal").value(false));
         assertThat(client.pendingCalls).isEqualTo(1);
         assertThat(client.pendingRequest).isEqualTo(
                 new AgentPendingApprovalRequest("session-1", "workspace-1"));
@@ -147,6 +158,78 @@ class AgentChatControllerTest {
                 .andExpect(status().isBadRequest());
 
         assertThat(client.pendingCalls).isZero();
+    }
+
+    @Test
+    void exposesVersionedApprovalOutcomeEndpointWithOnlySafeFields() throws Exception {
+        StubPythonAgentClient client = new StubPythonAgentClient(Flux.empty());
+        client.outcomeResult = Mono.just(new AgentApprovalOutcomeResponse(
+                "workspace-1", "session-1", "approval-1",
+                AgentApprovalOutcomeStatus.APPLIED_TESTS_FAILED, true,
+                new AgentApprovalOutcomeMutation(
+                        "approval-1", "workspace-1", "service/app.py", "replace",
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                new AgentApprovalOutcomeValidation(
+                        "failed", 1, false, "python_pytest")
+        ));
+        MockMvc mvc = standaloneSetup(new AgentChatController(client))
+                .setControllerAdvice(new ApiExceptionHandler())
+                .build();
+
+        MvcResult pending = mvc.perform(post("/api/v1/agent/chat/outcome")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"session-1","workspace_id":"workspace-1","approval_id":"approval-1"}
+                                """))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mvc.perform(asyncDispatch(pending))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.workspace_id").value("workspace-1"))
+                .andExpect(jsonPath("$.session_id").value("session-1"))
+                .andExpect(jsonPath("$.approval_id").value("approval-1"))
+                .andExpect(jsonPath("$.status").value("applied_tests_failed"))
+                .andExpect(jsonPath("$.terminal").value(true))
+                .andExpect(jsonPath("$.mutation.virtual_path").value("service/app.py"))
+                .andExpect(jsonPath("$.validation.profile").value("python_pytest"))
+                .andExpect(jsonPath("$.validation.stdout").doesNotExist());
+        assertThat(client.outcomeCalls).isEqualTo(1);
+        assertThat(client.outcomeRequest).isEqualTo(
+                new AgentApprovalOutcomeRequest("session-1", "workspace-1", "approval-1"));
+    }
+
+    @Test
+    void rejectsInvalidOrUnknownOutcomeRequestBeforeCallingEngine() throws Exception {
+        StubPythonAgentClient client = new StubPythonAgentClient(Flux.empty());
+        LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
+        validator.afterPropertiesSet();
+        MockMvc mvc = standaloneSetup(new AgentChatController(client))
+                .setControllerAdvice(new ApiExceptionHandler())
+                .setValidator(validator)
+                .build();
+
+        mvc.perform(post("/api/v1/agent/chat/outcome")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":" ","workspace_id":"","approval_id":"a","secret":"value"}
+                                """))
+                .andExpect(status().isBadRequest());
+
+        assertThat(client.outcomeCalls).isZero();
+    }
+
+    @Test
+    void outcomeErrorsMap404And409WithoutLeakingUpstreamDetails() throws Exception {
+        assertOutcomeFailureIsSanitized(404, 404, "请求的 Workspace 不存在");
+        assertOutcomeFailureIsSanitized(409, 409, "Workspace 当前不可用");
+    }
+
+    @Test
+    void outcomeUpstreamServerFailureMapsToBadGatewayWithoutLeakingDetails() throws Exception {
+        assertOutcomeFailureIsSanitized(503, 502, "小瑶暂时无法连接 Agent 引擎");
     }
 
     @Test
@@ -304,6 +387,33 @@ class AgentChatControllerTest {
         return new AgentChatRequest("hello", "session-1", "workspace-1");
     }
 
+    private void assertOutcomeFailureIsSanitized(
+            int upstreamStatus,
+            int expectedStatus,
+            String expectedDetail
+    ) throws Exception {
+        StubPythonAgentClient client = new StubPythonAgentClient(Flux.empty());
+        client.outcomeResult = Mono.error(new PythonAgentGatewayException(
+                "secret upstream outcome body", upstreamStatus));
+        MockMvc mvc = standaloneSetup(new AgentChatController(client))
+                .setControllerAdvice(new ApiExceptionHandler())
+                .build();
+        MvcResult pending = mvc.perform(post("/api/v1/agent/chat/outcome")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"session_id":"session-1","workspace_id":"workspace-1","approval_id":"approval-1"}
+                                """))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        mvc.perform(asyncDispatch(pending))
+                .andExpect(status().is(expectedStatus))
+                .andExpect(jsonPath("$.detail").value(
+                        org.hamcrest.Matchers.containsString(expectedDetail)))
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("secret upstream outcome body"))));
+    }
+
     private static final class StubPythonAgentClient extends PythonAgentClient {
         private final Flux<ServerSentEvent<String>> result;
         private int calls;
@@ -313,6 +423,9 @@ class AgentChatControllerTest {
         private AgentPendingApprovalRequest pendingRequest;
         private AgentPendingApprovalResponse pendingResult = new AgentPendingApprovalResponse(
                 "workspace-1", "session-1", AgentPendingApprovalStatus.IDLE, List.of());
+        private int outcomeCalls;
+        private AgentApprovalOutcomeRequest outcomeRequest;
+        private Mono<AgentApprovalOutcomeResponse> outcomeResult = Mono.empty();
 
         private StubPythonAgentClient(Flux<ServerSentEvent<String>> result) {
             super(WebClient.builder(), "http://127.0.0.1:1");
@@ -337,6 +450,13 @@ class AgentChatControllerTest {
             pendingCalls++;
             pendingRequest = request;
             return Mono.just(pendingResult);
+        }
+
+        @Override
+        public Mono<AgentApprovalOutcomeResponse> approvalOutcome(AgentApprovalOutcomeRequest request) {
+            outcomeCalls++;
+            outcomeRequest = request;
+            return outcomeResult;
         }
     }
 }

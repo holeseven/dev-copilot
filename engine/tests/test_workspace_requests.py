@@ -124,6 +124,8 @@ def _runtime_request(tmp_path):
         workspace_registry=registry,
         mcp_managers={},
         workspace_manager_lock=asyncio.Lock(),
+        approval_runs={},
+        approval_runs_lock=asyncio.Lock(),
         proposal_store=SqliteProposalStore(tmp_path / "proposals.sqlite3"),
     )
     return SimpleNamespace(app=SimpleNamespace(state=state)), registry
@@ -190,6 +192,39 @@ async def test_workspace_delete_closes_manager_created_during_initialization(
     assert registry.get("doomed") is None
     assert request.app.state.mcp_managers.get("doomed") is None
     assert old_manager.closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["delete", "add_repository"])
+async def test_workspace_mutation_rejects_active_approval_run(tmp_path, operation):
+    request, registry = _runtime_request(tmp_path)
+    workspace = registry.create("busy", "Busy")
+    request.app.state.approval_runs[
+        (workspace.id, workspace.generation, "approval-1", "session-hash")
+    ] = SimpleNamespace()
+
+    if operation == "delete":
+        call = workspaces.delete_workspace("busy", request)
+    else:
+        repository = tmp_path / "new-repo"
+        repository.mkdir()
+        call = workspaces.add_repository(
+            "busy",
+            workspaces.RepositoryCreate(
+                name="new-repo", local_path=str(repository)
+            ),
+            request,
+        )
+
+    with pytest.raises(workspaces.HTTPException) as exc_info:
+        await call
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "workspace has an active approval run"
+    unchanged = registry.get("busy")
+    assert unchanged is not None
+    assert unchanged.generation == workspace.generation
+    assert unchanged.repositories == []
 
 
 @pytest.mark.asyncio
