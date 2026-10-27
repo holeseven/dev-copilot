@@ -1,7 +1,11 @@
 package com.agent.controller;
 
 import com.agent.client.PythonWorkspaceClient;
+import com.agent.client.RagIndexStatusResponse;
+import com.agent.client.RagQueryRequest;
+import com.agent.client.RagQueryResponse;
 import com.fasterxml.jackson.databind.JsonNode;
+import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -71,5 +75,34 @@ public class WorkspaceController {
     @PostMapping(value = "/{workspaceId}/activate", produces = MediaType.APPLICATION_JSON_VALUE)
     public Mono<ResponseEntity<JsonNode>> activateWorkspace(@PathVariable String workspaceId) {
         return pythonWorkspaceClient.activateWorkspace(workspaceId);
+    }
+
+    @GetMapping(value = "/{workspaceId}/rag/index", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Mono<ResponseEntity<RagIndexStatusResponse>> ragIndexStatus(
+            @PathVariable String workspaceId
+    ) {
+        return pythonWorkspaceClient.ragIndexStatus(workspaceId);
+    }
+
+    @PostMapping(
+            value = "/{workspaceId}/rag/index/rebuild",
+            produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public Mono<ResponseEntity<RagIndexStatusResponse>> rebuildRagIndex(
+            @PathVariable String workspaceId
+    ) {
+        return pythonWorkspaceClient.rebuildRagIndex(workspaceId);
+    }
+
+    @PostMapping(
+            value = "/{workspaceId}/rag/query",
+            consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public Mono<ResponseEntity<RagQueryResponse>> queryRag(
+            @PathVariable String workspaceId,
+            @Valid @RequestBody RagQueryRequest request
+    ) {
+        return pythonWorkspaceClient.queryRag(workspaceId, request);
     }
 }

@@ -4,12 +4,15 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { getPendingApprovals, streamChat, streamResume } from "./api/chat";
 import type { AgentEvent } from "./api/sse";
 import { ApprovalCard, type Approval } from "./components/ApprovalCard";
+import { CitationList, type Citation } from "./components/CitationList";
 import {
   FileChangeCard,
   VerificationCard,
   type FileChange,
   type VerificationResult,
 } from "./components/ExecutionResults";
+import { KnowledgeIndexCard } from "./components/KnowledgeIndexCard";
+import { useKnowledgeIndex } from "./hooks/useKnowledgeIndex";
 import {
   activateWorkspace,
   addRepository,
@@ -26,7 +29,7 @@ import {
 } from "./state/workspaceSessions";
 
 type RunStatus = "idle" | "recovering" | "recovery_failed" | "connecting" | "streaming" | "awaiting_approval" | "resuming" | "completed" | "failed" | "cancelled";
-type Message = { id: string; role: "user" | "assistant"; content: string };
+type Message = { id: string; role: "user" | "assistant"; content: string; citations?: Citation[] };
 type ToolActivity = { id: string; name: string; status: string };
 type TerminalStatus = "completed" | "failed" | "awaiting_approval";
 type ScanSummary = {
@@ -41,6 +44,9 @@ const QUICK_PROMPTS = [
   "找出最值得优先修复的风险",
   "解释这个项目如何本地启动",
 ];
+
+const MAX_PENDING_CITATION_MESSAGES = 4;
+const MAX_PENDING_CITATIONS_PER_MESSAGE = 20;
 
 export function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -60,16 +66,24 @@ export function App() {
   const abortRef = useRef<AbortController | null>(null);
   const recoveryAbortRef = useRef<AbortController | null>(null);
   const activationAbortRef = useRef<AbortController | null>(null);
+  const scanAbortRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
   const recoveryGenerationRef = useRef(0);
   const activationGenerationRef = useRef(0);
+  const scanGenerationRef = useRef(0);
+  const workspaceIdRef = useRef(workspaceId);
   const terminalRef = useRef<{ generation: number; status: TerminalStatus | null }>({
     generation: 0,
     status: null,
   });
   const sessionIdsRef = useRef(new Map<string, string>());
   const approvalSubmissionsRef = useRef(new Set<string>());
+  const pendingCitationsRef = useRef(new Map<string, Citation[]>());
   const compactLayout = useMediaQuery("(max-width: 900px)");
+  const knowledgeIndex = useKnowledgeIndex(workspaceId);
+  const knowledgeIndexGenerationRef = useRef<string | null>(null);
+  knowledgeIndexGenerationRef.current = knowledgeIndex.status.indexGeneration;
+  workspaceIdRef.current = workspaceId;
 
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === workspaceId),
@@ -84,8 +98,37 @@ export function App() {
       abortRef.current?.abort();
       recoveryAbortRef.current?.abort();
       activationAbortRef.current?.abort();
+      scanGenerationRef.current += 1;
+      scanAbortRef.current?.abort();
+      pendingCitationsRef.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    if (!workspaceId || knowledgeIndex.loading
+      || knowledgeIndex.status.workspaceId !== workspaceId) return;
+    const pending = pendingCitationsRef.current;
+    if (pending.size === 0) return;
+    const activeIndexGeneration = knowledgeIndex.status.indexGeneration;
+    const matching = new Map<string, Citation[]>();
+    for (const [assistantId, citations] of pending) {
+      const accepted = citations.filter((citation) =>
+        citation.indexGeneration === activeIndexGeneration);
+      if (accepted.length > 0) matching.set(assistantId, accepted);
+    }
+    pending.clear();
+    if (matching.size === 0) return;
+    setMessages((items) => items.map((item) => {
+      const additions = matching.get(item.id);
+      if (!additions) return item;
+      return { ...item, citations: mergeCitations(item.citations ?? [], additions) };
+    }));
+  }, [
+    knowledgeIndex.loading,
+    knowledgeIndex.status.indexGeneration,
+    knowledgeIndex.status.workspaceId,
+    workspaceId,
+  ]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -157,6 +200,8 @@ export function App() {
     if (nextId === workspaceId) return;
     stopRun("cancelled");
     activationAbortRef.current?.abort();
+    scanGenerationRef.current += 1;
+    scanAbortRef.current?.abort();
     const controller = new AbortController();
     activationAbortRef.current = controller;
     const activationGeneration = ++activationGenerationRef.current;
@@ -167,6 +212,7 @@ export function App() {
     setApprovals([]);
     setFileChanges([]);
     setVerifications([]);
+    setDraft("");
     setStatus("idle");
     try {
       await activateWorkspace(nextId, { signal: controller.signal });
@@ -188,6 +234,9 @@ export function App() {
       activationAbortRef.current?.abort();
       activationAbortRef.current = null;
       activationGenerationRef.current += 1;
+      scanGenerationRef.current += 1;
+      scanAbortRef.current?.abort();
+      scanAbortRef.current = null;
       sessionIdsRef.current.delete(id);
       removeWorkspaceSession(id);
       const remaining = workspaces.filter((item) => item.id !== id);
@@ -209,13 +258,24 @@ export function App() {
 
   async function runScan() {
     if (!workspaceId) return;
+    const scope = workspaceId;
+    const scanGeneration = ++scanGenerationRef.current;
+    scanAbortRef.current?.abort();
+    const controller = new AbortController();
+    scanAbortRef.current = controller;
     setNotice("正在扫描项目结构……");
     try {
-      const result = await scanWorkspace(workspaceId);
+      const result = await scanWorkspace(scope, { signal: controller.signal });
+      if (controller.signal.aborted || scanGeneration !== scanGenerationRef.current
+        || scope !== workspaceIdRef.current) return;
       setScan(result as ScanSummary[]);
       setNotice(`扫描完成，识别到 ${result.length} 个仓库。`);
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted || scanGeneration !== scanGenerationRef.current
+        || scope !== workspaceIdRef.current || isAbort(error)) return;
       setNotice("扫描失败，请检查目录是否仍在允许根目录内。");
+    } finally {
+      if (scanAbortRef.current === controller) scanAbortRef.current = null;
     }
   }
 
@@ -234,7 +294,7 @@ export function App() {
     setMessages((items) => [
       ...items,
       { id: makeId(), role: "user", content: trimmed },
-      { id: assistantId, role: "assistant", content: "" },
+      { id: assistantId, role: "assistant", content: "", citations: [] },
     ]);
     setDraft("");
     setTools([]);
@@ -255,12 +315,14 @@ export function App() {
         if (terminal.generation === generation && terminal.status) {
           setStatus(terminal.status);
         } else {
+          pendingCitationsRef.current.delete(assistantId);
           setStatus("failed");
           setNotice("连接在完成事件前中断，请重试本轮任务。");
         }
       }
     } catch (error) {
       if (generation !== generationRef.current) return;
+      pendingCitationsRef.current.delete(assistantId);
       if (isAbort(error)) setStatus("cancelled");
       else {
         setStatus("failed");
@@ -308,11 +370,22 @@ export function App() {
         truncated: data.truncated === true,
       };
       setVerifications((items) => [...items.filter((item) => item.id !== toolCallId), result]);
+    } else if (event.event === "citation") {
+      const activeIndexGeneration = knowledgeIndexGenerationRef.current;
+      const citation = citationFromEvent(data, workspaceId);
+      if (!citation) return;
+      if (!activeIndexGeneration) {
+        queuePendingCitation(assistantId, citation);
+        return;
+      }
+      if (citation.indexGeneration !== activeIndexGeneration) return;
+      appendCitation(assistantId, citation);
     } else if (event.event === "approval_required") {
       const approval = approvalFromRecord(data);
       const approvalId = approval.id;
       setApprovals((items) => [...items.filter((item) => item.id !== approvalId), approval]);
     } else if (event.event === "error") {
+      pendingCitationsRef.current.delete(assistantId);
       terminalRef.current = { generation, status: "failed" };
       setStatus("failed");
       setNotice(safeAgentError(data.code));
@@ -321,8 +394,32 @@ export function App() {
         ? "failed"
         : data.status === "awaiting_approval" ? "awaiting_approval" : "completed";
       terminalRef.current = { generation, status: terminalStatus };
+      if (terminalStatus === "failed") pendingCitationsRef.current.delete(assistantId);
       setStatus(terminalStatus);
     }
+  }
+
+  function appendCitation(assistantId: string, citation: Citation) {
+    setMessages((items) => items.map((item) => item.id === assistantId
+      ? { ...item, citations: mergeCitations(item.citations ?? [], [citation]) }
+      : item));
+  }
+
+  function queuePendingCitation(assistantId: string, citation: Citation) {
+    const pending = pendingCitationsRef.current;
+    const existing = pending.get(assistantId);
+    if (existing) {
+      if (existing.length >= MAX_PENDING_CITATIONS_PER_MESSAGE
+        || existing.some((candidate) => candidate.id === citation.id
+          && candidate.indexGeneration === citation.indexGeneration)) return;
+      existing.push(citation);
+      return;
+    }
+    if (pending.size >= MAX_PENDING_CITATION_MESSAGES) {
+      const oldestAssistantId = pending.keys().next().value;
+      if (typeof oldestAssistantId === "string") pending.delete(oldestAssistantId);
+    }
+    pending.set(assistantId, [citation]);
   }
 
   async function resumeApproval(approval: Approval, approved: boolean, reason?: string) {
@@ -356,6 +453,7 @@ export function App() {
       if (generation !== generationRef.current) return;
       const terminal = terminalRef.current;
       if (terminal.generation !== generation || !terminal.status) {
+        pendingCitationsRef.current.delete(assistantId);
         setStatus("failed");
         setNotice("连接在完成事件前中断，请重试本轮任务。");
         setApprovals((items) => items.map((item) => item.id === approval.id
@@ -367,6 +465,7 @@ export function App() {
           ? "failed" : approved ? "approved" : "rejected" } : item));
     } catch (error) {
       if (generation !== generationRef.current) return;
+      pendingCitationsRef.current.delete(assistantId);
       setStatus(isAbort(error) ? "cancelled" : "failed");
       if (!isAbort(error)) setNotice("审批提交失败，请检查服务状态后重试。");
       setApprovals((items) => items.map((item) => item.id === approval.id
@@ -378,6 +477,7 @@ export function App() {
 
   function stopRun(nextStatus: RunStatus = "cancelled") {
     generationRef.current += 1;
+    pendingCitationsRef.current.clear();
     abortRef.current?.abort();
     abortRef.current = null;
     setStatus((current) => current === "connecting" || current === "streaming" || current === "resuming"
@@ -446,6 +546,13 @@ export function App() {
                 onClick={() => void removeWorkspace(selectedWorkspace.id)}>移除</button>
             </div>
           ) : null}
+          {selectedWorkspace ? <KnowledgeIndexCard
+            status={knowledgeIndex.status}
+            loading={knowledgeIndex.loading}
+            rebuilding={knowledgeIndex.rebuilding}
+            onRefresh={() => void knowledgeIndex.refresh()}
+            onRebuild={() => void knowledgeIndex.rebuild()}
+          /> : null}
           <div className="local-note">
             <span aria-hidden="true">⌂</span>
             <p><strong>代码留在本机</strong><br /><small>浏览器只发送路径登记与开发指令。</small></p>
@@ -495,6 +602,7 @@ export function App() {
                   <article key={message.id} className={`message ${message.role}`}>
                     <p className="message-role">{message.role === "user" ? "主人" : "小瑶"}</p>
                     <div>{message.content || (busy ? <span className="typing">正在理解项目<span>…</span></span> : "未返回内容")}</div>
+                    {message.role === "assistant" ? <CitationList citations={message.citations ?? []} /> : null}
                   </article>
                 ))}
               </div>
@@ -730,6 +838,70 @@ function safeAgentError(code: unknown) {
 
 function stringValue(value: unknown) {
   return typeof value === "string" && value ? value : undefined;
+}
+
+function citationFromEvent(
+  data: Record<string, unknown>, workspaceId: string,
+): Citation | undefined {
+  const indexGeneration = stringValue(data.index_generation);
+  if (stringValue(data.workspace_id) !== workspaceId || !indexGeneration
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(indexGeneration)) {
+    return undefined;
+  }
+  const raw = asRecord(data.citation);
+  const id = stringValue(raw.citation_id);
+  const repository = stringValue(raw.repository);
+  const virtualPath = stringValue(raw.virtual_path);
+  const excerpt = stringValue(raw.excerpt);
+  const contentSha256 = stringValue(raw.content_sha256);
+  const rank = positiveInteger(raw.rank);
+  const startLine = positiveInteger(raw.start_line);
+  const endLine = positiveInteger(raw.end_line);
+  if (!id || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)
+    || !repository || !virtualPath || !excerpt || excerpt.length > 2000 || !contentSha256
+    || !/^[a-fA-F0-9]{64}$/.test(contentSha256) || !rank || !startLine || !endLine
+    || endLine < startLine || !safeRepositoryName(repository) || !safeRelativePath(virtualPath)) {
+    return undefined;
+  }
+  return {
+    id,
+    rank,
+    repository,
+    virtualPath,
+    startLine,
+    endLine,
+    excerpt,
+    indexGeneration,
+    contentSha256: contentSha256.toLowerCase(),
+  };
+}
+
+function mergeCitations(existing: Citation[], additions: Citation[]) {
+  const merged = [...existing];
+  for (const citation of additions) {
+    if (!merged.some((candidate) => candidate.id === citation.id)) merged.push(citation);
+  }
+  return merged;
+}
+
+function positiveInteger(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function safeRelativePath(value: string) {
+  if (value.length > 1024 || /^\//.test(value) || value.includes("\\")
+    || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value) || hasUnsafeUnicode(value)) return false;
+  const segments = value.split(/\//);
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+function safeRepositoryName(value: string) {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)
+    && value !== "." && value !== ".." && !hasUnsafeUnicode(value);
+}
+
+function hasUnsafeUnicode(value: string) {
+  return /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(value);
 }
 
 function approvalFromRecord(data: Record<string, unknown>): Approval {

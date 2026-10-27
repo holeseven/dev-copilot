@@ -20,6 +20,7 @@ def isolate_settings_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "WORKSPACE_DIR",
         "WORKSPACE_METADATA_DIR",
         "WORKSPACE_ALLOWED_ROOTS",
+        "RAG_DB_PATH",
     }
     normalized_setting_names = {name.casefold() for name in setting_names}
     for name in list(os.environ):
@@ -45,16 +46,21 @@ def test_secure_local_defaults_are_backward_compatible() -> None:
     assert settings.resolved_proposal_db_path == (
         settings.workspace_metadata_path / "proposals.sqlite3"
     )
+    assert settings.resolved_rag_db_path == (
+        settings.workspace_metadata_path / "rag.sqlite3"
+    )
 
 
 def test_checkpoint_paths_can_be_overridden(tmp_path: Path) -> None:
     settings = make_settings(
         checkpoint_db_path=str(tmp_path / "checkpoints.db"),
         proposal_db_path=str(tmp_path / "proposals.db"),
+        rag_db_path=str(tmp_path / "rag.db"),
     )
 
     assert settings.resolved_checkpoint_db_path == (tmp_path / "checkpoints.db").resolve()
     assert settings.resolved_proposal_db_path == (tmp_path / "proposals.db").resolve()
+    assert settings.resolved_rag_db_path == (tmp_path / "rag.db").resolve()
 
 
 def test_allowed_roots_accept_json_array(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

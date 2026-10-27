@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     )
     checkpoint_db_path: str | None = Field(default=None)
     proposal_db_path: str | None = Field(default=None)
+    rag_db_path: str | None = Field(default=None)
     workspace_allowed_roots: str | None = Field(
         default=None,
         description="允许注册的工作区根目录（JSON 数组或系统路径分隔符分隔）",
@@ -83,6 +84,12 @@ class Settings(BaseSettings):
         if self.proposal_db_path:
             return Path(self.proposal_db_path).expanduser().resolve()
         return self.workspace_metadata_path / "proposals.sqlite3"
+
+    @property
+    def resolved_rag_db_path(self) -> Path:
+        if self.rag_db_path:
+            return Path(self.rag_db_path).expanduser().resolve()
+        return self.workspace_metadata_path / "rag.sqlite3"
 
     @property
     def workspace_allowed_root_paths(self) -> tuple[Path, ...]:

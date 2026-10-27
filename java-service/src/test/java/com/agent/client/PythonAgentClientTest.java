@@ -61,6 +61,9 @@ class PythonAgentClientTest {
                     event: tool
                     data: {"status":"end","tool_name":"read_file"}
 
+                    event: citation
+                    data: {"citation_id":"cite-1","virtual_path":"docs/domain.md"}
+
                     event: done
                     data: {"status":"completed"}
 
@@ -81,11 +84,12 @@ class PythonAgentClientTest {
         assertThat(requestJson.get("session_id").asText()).isEqualTo("session-1");
         assertThat(requestJson.get("workspace_id").asText()).isEqualTo("workspace-1");
         assertThat(events).extracting(ServerSentEvent::event)
-                .containsExactly("message", "tool", "done");
+                .containsExactly("message", "tool", "citation", "done");
         assertThat(events).extracting(ServerSentEvent::data)
                 .containsExactly(
                         "{\"token\":\"你好\"}",
                         "{\"status\":\"end\",\"tool_name\":\"read_file\"}",
+                        "{\"citation_id\":\"cite-1\",\"virtual_path\":\"docs/domain.md\"}",
                         "{\"status\":\"completed\"}"
                 );
     }

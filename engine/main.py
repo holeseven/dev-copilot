@@ -29,6 +29,8 @@ from engine.core.hitl.coordinator import ApprovalCoordinator
 from engine.core.workspace.registry import WorkspaceRegistry
 from engine.core.workspace.scanner import WorkspaceScanner
 from engine.core.workspace.proposal_store import SqliteProposalStore
+from engine.core.rag.service import RagService
+from engine.core.rag.store import RagStore
 from engine.orchestrator.graph_builder import build_agent_graph
 
 
@@ -75,6 +77,10 @@ async def _runtime_lifespan(app: FastAPI, settings, checkpointer):
         path_guard=app.state.workspace_registry.path_guard
     )
     app.state.proposal_store = SqliteProposalStore(settings.resolved_proposal_db_path)
+    app.state.rag_service = RagService(
+        RagStore(settings.resolved_rag_db_path),
+        app.state.workspace_registry.path_guard,
+    )
     app.state.agent_graph = build_agent_graph(checkpointer=checkpointer)
     app.state.approval_coordinator = ApprovalCoordinator()
     app.state.dispatcher = get_agent_dispatcher()
@@ -102,6 +108,11 @@ async def _runtime_lifespan(app: FastAPI, settings, checkpointer):
                     "Workspace {} runtime cleanup failed", workspace_id
                 )
                 cleanup_errors.append(exc)
+        try:
+            await app.state.rag_service.shutdown()
+        except Exception as exc:
+            logger.exception("RAG service cleanup failed")
+            cleanup_errors.append(exc)
         try:
             await dynamic_config.stop_refresh()
         except Exception as exc:
@@ -155,11 +166,12 @@ def create_app() -> FastAPI:
         return {"status": "ok", "app": settings.app_name}
 
     # ===== 业务路由挂载 =====
-    from engine.api import chat, tasks, tools, workspaces
+    from engine.api import chat, rag, tasks, tools, workspaces
     app.include_router(chat.router, prefix="/chat", tags=["chat"])
     app.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
     app.include_router(tools.router, prefix="/tools", tags=["tools"])
     app.include_router(workspaces.router, prefix="/workspaces", tags=["workspaces"])
+    app.include_router(rag.router, prefix="/workspaces", tags=["rag"])
 
     # ===== 静态前端首页 =====
     _frontend_path = Path(__file__).parent / "frontend" / "index.html"

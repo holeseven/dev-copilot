@@ -27,10 +27,6 @@ dependencies = [
     "python-dotenv>=1.0.0",
     # 日志
     "loguru>=0.7.0",
-    # 向量检索（RAG 知识库）
-    "faiss-cpu>=1.8.0",
-    "numpy>=1.26.0",
-    "langchain-text-splitters>=0.3.0",
     # MCP 协议
     "mcp>=1.0.0",
     "langgraph-checkpoint-sqlite>=3.1.2",

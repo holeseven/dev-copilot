@@ -1,10 +1,11 @@
 // @author lxy
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { getPendingApprovals, streamChat, streamResume } from "./api/chat";
-import { activateWorkspace, deleteWorkspace, listWorkspaces } from "./api/workspaces";
+import { getKnowledgeIndex, rebuildKnowledgeIndex } from "./api/rag";
+import { activateWorkspace, deleteWorkspace, listWorkspaces, scanWorkspace } from "./api/workspaces";
 import { loadWorkspaceSession, saveWorkspaceSession } from "./state/workspaceSessions";
 
 vi.mock("./api/chat", () => ({
@@ -18,6 +19,9 @@ vi.mock("./api/workspaces", () => ({
   addRepository: vi.fn(),
   scanWorkspace: vi.fn().mockResolvedValue([]),
 }));
+vi.mock("./api/rag", () => ({
+  getKnowledgeIndex: vi.fn(), rebuildKnowledgeIndex: vi.fn(),
+}));
 
 const workspace = { id: "local-dev", name: "本地项目", repositories: [] };
 
@@ -26,6 +30,291 @@ describe("小瑶开发助手工作台", () => {
     vi.clearAllMocks();
     localStorage.clear();
     vi.mocked(listWorkspaces).mockResolvedValue([workspace]);
+    vi.mocked(getKnowledgeIndex).mockResolvedValue({
+      workspaceId: "local-dev", state: "not_indexed", indexGeneration: null, jobId: null,
+      repositoryCount: 0, fileCount: 0, chunkCount: 0, updatedAt: null, errorCode: null,
+    });
+    vi.mocked(rebuildKnowledgeIndex).mockResolvedValue({
+      workspaceId: "local-dev", state: "queued", indexGeneration: null, jobId: "job-1",
+      repositoryCount: 0, fileCount: 0, chunkCount: 0, updatedAt: null, errorCode: null,
+    });
+  });
+
+  it("shows workspace knowledge status without locking chat when status is unavailable", async () => {
+    vi.mocked(getKnowledgeIndex).mockRejectedValue(new Error("offline"));
+    render(<App />);
+
+    expect(await screen.findByText("知识索引状态暂不可用")).toBeInTheDocument();
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeEnabled();
+  });
+
+  it("binds safe citation events to the current assistant message and clears them on switch", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace,
+      { id: "other", name: "另一个项目", repositories: [] },
+    ]);
+    vi.mocked(getKnowledgeIndex).mockImplementation(async (workspaceId) => ({
+      workspaceId, state: "ready", indexGeneration: "index-1", jobId: null,
+      repositoryCount: 1, fileCount: 2, chunkCount: 7,
+      updatedAt: "2026-10-27T10:00:00Z", errorCode: null,
+    }));
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      await onEvent({ event: "message", data: { token: "认证入口在这里。[1]" } });
+      await onEvent({ event: "citation", data: {
+        tool_call_id: "rag-1", workspace_id: "local-dev", index_generation: "index-1",
+        citation: {
+          citation_id: "citation-1", rank: 1, repository: "backend",
+          virtual_path: "src/auth.py", start_line: 12, end_line: 18,
+          excerpt: "def authenticate(user):", score: 0.01,
+          content_sha256: "a".repeat(64),
+          repository_root: "C:\\secret\\repo",
+        },
+      } });
+      await onEvent({ event: "citation", data: {
+        workspace_id: "local-dev", index_generation: "index-1",
+        citation: {
+          citation_id: "citation-1", rank: 1, repository: "backend",
+          virtual_path: "src/auth.py", start_line: 12, end_line: 18,
+          excerpt: "def authenticate(user):",
+          content_sha256: "a".repeat(64),
+        },
+      } });
+      await onEvent({ event: "citation", data: {
+        workspace_id: "local-dev", index_generation: "index-1",
+        citation: {
+          citation_id: "citation-2", rank: 2, repository: "C:\\secret\\repo",
+          virtual_path: "src/leak.py", start_line: 1, end_line: 2,
+          excerpt: "must not render",
+          content_sha256: "a".repeat(64),
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+      target: { value: "认证入口在哪" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+
+    expect(await screen.findByText("参考源码 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("参考源码 1"));
+    expect(screen.getByText("backend / src/auth.py:12–18")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("C:\\secret\\repo");
+    expect(document.body.textContent).not.toContain("0.01");
+
+    fireEvent.click(screen.getByRole("button", { name: /另一个项目/ }));
+    await waitFor(() => expect(screen.queryByText("参考源码 1")).not.toBeInTheDocument());
+  });
+
+  it("rejects stale-generation, malformed-hash, and unsafe-path citations", async () => {
+    vi.mocked(getKnowledgeIndex).mockResolvedValue({
+      workspaceId: "local-dev", state: "ready", indexGeneration: "index-current", jobId: null,
+      repositoryCount: 1, fileCount: 2, chunkCount: 7,
+      updatedAt: "2026-10-27T10:00:00Z", errorCode: null,
+    });
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      for (const [id, generation, repository, virtualPath, hash] of [
+        ["old", "index-old", "backend", "src/old.py", "a".repeat(64)],
+        ["hash", "index-current", "backend", "src/hash.py", "not-a-hash"],
+        ["scheme", "index-current", "backend", "https://evil.test/x.py", "b".repeat(64)],
+        ["slash", "index-current", "backend", "src\\leak.py", "c".repeat(64)],
+        ["bidi", "index-current", "backend", "src/\u202eleak.py", "d".repeat(64)],
+        ["repo", "index-current", "bad:name", "src/repo.py", "e".repeat(64)],
+        ["../../unsafe", "index-current", "backend", "src/id.py", "e".repeat(64)],
+        ["safe", "index-current", "backend", "src/safe.py", "f".repeat(64)],
+      ] as const) {
+        await onEvent({ event: "citation", data: {
+          workspace_id: "local-dev", index_generation: generation,
+          citation: {
+            citation_id: id, rank: 1, repository, virtual_path: virtualPath,
+            start_line: 1, end_line: 2, excerpt: id, content_sha256: hash,
+          },
+        } });
+      }
+      await onEvent({ event: "citation", data: {
+        workspace_id: "local-dev", index_generation: "index-current",
+        citation: {
+          citation_id: "too-long", rank: 2, repository: "backend",
+          virtual_path: "src/long.py", start_line: 1, end_line: 2,
+          excerpt: "x".repeat(2001), content_sha256: "f".repeat(64),
+        },
+      } });
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    await screen.findByText("知识索引可用");
+    fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+      target: { value: "检查引用" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+
+    expect(await screen.findByText("参考源码 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("参考源码 1"));
+    expect(screen.getByText(/src\/safe\.py/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/old|hash|evil|leak|repo\.py|id\.py|long\.py/);
+  });
+
+  it("uses the latest index generation while a chat stream is active", async () => {
+    vi.mocked(getKnowledgeIndex).mockResolvedValue({
+      workspaceId: "local-dev", state: "ready", indexGeneration: "index-old", jobId: null,
+      repositoryCount: 1, fileCount: 2, chunkCount: 7,
+      updatedAt: "2026-10-27T10:00:00Z", errorCode: null,
+    });
+    vi.mocked(rebuildKnowledgeIndex).mockResolvedValue({
+      workspaceId: "local-dev", state: "queued", indexGeneration: "index-current", jobId: "job-2",
+      repositoryCount: 1, fileCount: 2, chunkCount: 7,
+      updatedAt: "2026-10-27T10:01:00Z", errorCode: null,
+    });
+    let emit!: Parameters<typeof streamChat>[1];
+    let finish!: () => void;
+    vi.mocked(streamChat).mockImplementation((_request, onEvent) => {
+      emit = onEvent;
+      return new Promise<void>((resolve) => { finish = resolve; });
+    });
+    render(<App />);
+    await screen.findByText("知识索引可用");
+    fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+      target: { value: "持续检查引用" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+    await waitFor(() => expect(streamChat).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: "重建知识索引" }));
+    await screen.findByText("已进入索引队列");
+
+    await act(async () => {
+      for (const [id, generation, path] of [
+        ["old-citation", "index-old", "src/old.py"],
+        ["current-citation", "index-current", "src/current.py"],
+      ]) {
+        await emit({ event: "citation", data: {
+          workspace_id: "local-dev", index_generation: generation,
+          citation: {
+            citation_id: id, rank: 1, repository: "backend", virtual_path: path,
+            start_line: 1, end_line: 2, excerpt: id, content_sha256: "a".repeat(64),
+          },
+        } });
+      }
+      await emit({ event: "done", data: { status: "completed" } });
+      finish();
+    });
+
+    expect(await screen.findByText("参考源码 1")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("参考源码 1"));
+    expect(screen.getByText(/src\/current\.py/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("src/old.py");
+  });
+
+  it("replays only matching citations when index status arrives after the stream", async () => {
+    let resolveIndex!: (value: Awaited<ReturnType<typeof getKnowledgeIndex>>) => void;
+    vi.mocked(getKnowledgeIndex).mockImplementation(() => new Promise((resolve) => {
+      resolveIndex = resolve;
+    }));
+    vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+      for (const [id, generation, path] of [
+        ["current", "index-current", "src/current.py"],
+        ["mismatch", "index-other", "src/other.py"],
+      ] as const) {
+        await onEvent({ event: "citation", data: {
+          workspace_id: "local-dev", index_generation: generation,
+          citation: {
+            citation_id: id, rank: 1, repository: "backend", virtual_path: path,
+            start_line: 1, end_line: 2, excerpt: id, content_sha256: "a".repeat(64),
+          },
+        } });
+      }
+      await onEvent({ event: "done", data: { status: "completed" } });
+    });
+    render(<App />);
+    await waitFor(() => expect(document.querySelector(".workspace-card.active")).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "deferred citation" } });
+    fireEvent.click(document.querySelector<HTMLButtonElement>('.composer button[type="submit"]')!);
+    await waitFor(() => expect(streamChat).toHaveBeenCalledOnce());
+    expect(document.querySelector(".citation-list")).not.toBeInTheDocument();
+
+    await act(async () => resolveIndex({
+      workspaceId: "local-dev", state: "ready", indexGeneration: "index-current", jobId: null,
+      repositoryCount: 1, fileCount: 2, chunkCount: 7,
+      updatedAt: "2026-10-27T10:00:00Z", errorCode: null,
+    }));
+
+    await waitFor(() => expect(document.querySelector(".citation-list")).toBeInTheDocument());
+    fireEvent.click(document.querySelector(".citation-list summary")!);
+    expect(screen.getByText(/src\/current\.py/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("src/other.py");
+  });
+
+  it.each(["queued", "building", "failed"] as const)(
+    "accepts a matching active-generation citation while index state is %s",
+    async (state) => {
+      vi.mocked(getKnowledgeIndex).mockResolvedValue({
+        workspaceId: "local-dev", state, indexGeneration: "index-active",
+        jobId: state === "queued" || state === "building" ? "job-1" : null,
+        repositoryCount: 1, fileCount: 2, chunkCount: 7,
+        updatedAt: "2026-10-27T10:00:00Z",
+        errorCode: state === "failed" ? "rebuild_failed" : null,
+      });
+      vi.mocked(streamChat).mockImplementation(async (_request, onEvent) => {
+        await onEvent({ event: "citation", data: {
+          workspace_id: "local-dev", index_generation: "index-active",
+          citation: {
+            citation_id: `citation-${state}`, rank: 1, repository: "backend",
+            virtual_path: `src/${state}.py`, start_line: 1, end_line: 2,
+            excerpt: `active ${state}`, content_sha256: "a".repeat(64),
+          },
+        } });
+        await onEvent({ event: "citation", data: {
+          workspace_id: "local-dev", index_generation: "index-stale",
+          citation: {
+            citation_id: `stale-${state}`, rank: 2, repository: "backend",
+            virtual_path: "src/stale.py", start_line: 1, end_line: 2,
+            excerpt: "must not render", content_sha256: "b".repeat(64),
+          },
+        } });
+        await onEvent({ event: "done", data: { status: "completed" } });
+      });
+      render(<App />);
+      await screen.findByRole("button", { name: /本地项目/ });
+      await waitFor(() => expect(getKnowledgeIndex).toHaveBeenCalled());
+      fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+        target: { value: "检查旧索引引用" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
+
+      expect(await screen.findByText("参考源码 1")).toBeInTheDocument();
+      fireEvent.click(screen.getByText("参考源码 1"));
+      expect(screen.getByText(new RegExp(`src/${state}\\.py`))).toBeInTheDocument();
+      expect(document.body.textContent).not.toContain("src/stale.py");
+    },
+  );
+
+  it("aborts a scan, ignores its late result, and clears the draft on workspace switch", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      workspace,
+      { id: "other", name: "另一个项目", repositories: [] },
+    ]);
+    let scanSignal: AbortSignal | undefined;
+    let resolveScan!: (value: unknown[]) => void;
+    vi.mocked(scanWorkspace).mockImplementation((_workspaceId, options) => {
+      if (!options) throw new Error("scan options are required");
+      scanSignal = options.signal;
+      return new Promise((resolve) => { resolveScan = resolve; });
+    });
+    render(<App />);
+    await screen.findByRole("button", { name: /本地项目/ });
+    fireEvent.change(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么"), {
+      target: { value: "不要带到另一个工作区" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "重新扫描" }));
+    await waitFor(() => expect(scanWorkspace).toHaveBeenCalledOnce());
+    fireEvent.click(screen.getByRole("button", { name: /另一个项目/ }));
+
+    expect(scanSignal?.aborted).toBe(true);
+    expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toHaveValue("");
+    resolveScan([{ repository: "stale-repository", languages: ["Python"] }]);
+    await Promise.resolve();
+    expect(document.body.textContent).not.toContain("stale-repository");
   });
 
   it("renders the product identity and local workspace welcome", async () => {
@@ -274,7 +563,7 @@ describe("小瑶开发助手工作台", () => {
     fireEvent.click(screen.getByRole("button", { name: /开始协作/ }));
 
     expect(await screen.findByText("src/main.py")).toBeInTheDocument();
-    expect(screen.getByText("验证通过")).toBeInTheDocument();
+    expect(await screen.findByText("验证通过")).toBeInTheDocument();
     expect(screen.getByText("python_pytest")).toBeInTheDocument();
     expect(screen.queryByText("1 passed")).not.toBeInTheDocument();
 

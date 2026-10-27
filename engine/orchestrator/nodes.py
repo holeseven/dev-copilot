@@ -385,6 +385,7 @@ async def tool_node(
             tool_msg = ToolMessage(content=result_content, tool_call_id=tool_id)
             messages.append(tool_msg)
             await _dispatch_controlled_change_events(result, tool_id, config)
+            await _dispatch_citation_events(result, tool_id, config)
             if isinstance(result, str) and result.startswith("[ERROR]"):
                 await adispatch_custom_event(
                     "tool_status",
@@ -454,6 +455,34 @@ async def _dispatch_controlled_change_events(
             {"tool_call_id": tool_call_id, **validation},
             config=config,
         )
+
+
+_CITATION_FIELDS = {
+    "citation_id", "rank", "repository", "virtual_path", "start_line",
+    "end_line", "excerpt", "content_sha256",
+}
+
+
+async def _dispatch_citation_events(
+    result: Any, tool_call_id: str, config: RunnableConfig
+) -> None:
+    if not isinstance(result, dict) or not isinstance(result.get("citations"), list):
+        return
+    for citation in result["citations"]:
+        if not isinstance(citation, dict):
+            continue
+        safe = {key: citation[key] for key in _CITATION_FIELDS if key in citation}
+        if safe.get("citation_id") and safe.get("virtual_path"):
+            await adispatch_custom_event(
+                "citation",
+                {
+                    "tool_call_id": tool_call_id,
+                    "workspace_id": str(result.get("workspace_id", "")),
+                    "index_generation": str(result.get("index_generation", "")),
+                    "citation": safe,
+                },
+                config=config,
+            )
 
 
 def _normalize_tool_calls(tool_calls: list, *, session_id: str) -> list[dict[str, Any]]:

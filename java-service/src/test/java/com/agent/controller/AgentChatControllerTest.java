@@ -195,8 +195,12 @@ class AgentChatControllerTest {
                 .event("message")
                 .data("{\"token\":\"hi\"}")
                 .build();
+        ServerSentEvent<String> citation = ServerSentEvent.<String>builder()
+                .event("citation")
+                .data("{\"citation_id\":\"cite-1\",\"virtual_path\":\"docs/domain.md\"}")
+                .build();
         StubPythonAgentClient client = new StubPythonAgentClient(Flux.concat(
-                Flux.just(message),
+                Flux.just(message, citation),
                 Flux.error(new IllegalStateException("stream dropped"))
         ));
 
@@ -206,9 +210,11 @@ class AgentChatControllerTest {
                 .block();
 
         assertThat(events).extracting(ServerSentEvent::event)
-                .containsExactly("message", "error", "done");
-        assertThat(events.get(1).data()).contains("Agent 流中断");
-        assertThat(events.get(2).data()).isEqualTo("{\"status\":\"failed\"}");
+                .containsExactly("message", "citation", "error", "done");
+        assertThat(events.get(1).data())
+                .isEqualTo("{\"citation_id\":\"cite-1\",\"virtual_path\":\"docs/domain.md\"}");
+        assertThat(events.get(2).data()).contains("Agent 流中断");
+        assertThat(events.get(3).data()).isEqualTo("{\"status\":\"failed\"}");
     }
 
     @Test

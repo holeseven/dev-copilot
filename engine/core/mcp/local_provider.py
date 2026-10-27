@@ -27,6 +27,7 @@ class LocalDevToolProvider(ToolProvider):
         path_guard: WorkspacePathGuard,
         *,
         change_service: Optional[ControlledChangeService] = None,
+        rag_service: Any = None,
     ):
         super().__init__(name)
         self.workspace = workspace
@@ -38,6 +39,7 @@ class LocalDevToolProvider(ToolProvider):
             workspace=workspace,
             path_guard=path_guard,
         )
+        self.rag_service = rag_service
 
     async def list_tools(self) -> List[Dict[str, Any]]:
         return [
@@ -46,6 +48,15 @@ class LocalDevToolProvider(ToolProvider):
             self._schema("grep_code", "Search code with a regular expression.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "ignore_case": {"type": "boolean"}}, ["pattern"]),
             self._schema("read_file", "Read a file from the workspace.", {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, ["path"]),
             self._schema("code_search", "Search code in the workspace.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "file_glob": {"type": "string"}, "max_results": {"type": "integer"}}, ["pattern"]),
+            self._schema(
+                "search_workspace",
+                "Search the user-built workspace RAG index and return line-addressable citations.",
+                {
+                    "query": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+                },
+                ["query"],
+            ),
             self._schema(
                 "preview_edit_file",
                 "Preview one exact UTF-8 replacement. Use the returned proposal with apply_workspace_change.",
@@ -95,6 +106,19 @@ class LocalDevToolProvider(ToolProvider):
             return self._read_file(arguments["path"], arguments.get("start_line"), arguments.get("end_line"))
         if tool_name == "code_search":
             return await self._code_search(arguments["pattern"], arguments.get("path", "."), arguments.get("file_glob", ""), arguments.get("max_results", 50))
+        if tool_name == "search_workspace":
+            if set(arguments) - {"query", "top_k"} or "query" not in arguments:
+                raise ValueError("tool arguments do not match the required schema")
+            query = arguments["query"]
+            top_k = arguments.get("top_k", 8)
+            if not isinstance(query, str) or not 1 <= len(query) <= 4000:
+                raise ValueError("query length must be between 1 and 4000")
+            if not isinstance(top_k, int) or isinstance(top_k, bool) or not 1 <= top_k <= 20:
+                raise ValueError("top_k must be between 1 and 20")
+            if self.rag_service is None:
+                raise RuntimeError("workspace RAG is unavailable")
+            result = self.rag_service.query(self.workspace, query, top_k)
+            return result.model_dump() if hasattr(result, "model_dump") else result
         if tool_name == "preview_edit_file":
             self._require_exact_keys(
                 arguments, {"path", "old_text", "new_text", "validation_profile"}

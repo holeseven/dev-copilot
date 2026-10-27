@@ -2,12 +2,14 @@
 """
 知识检索 Agent
 
-负责通过 RAG search_docs 工具检索知识库文档，
+负责通过 workspace 绑定的 RAG search_workspace 工具检索项目文档，
 将检索结果整合后返回给用户。适用于知识查询、文档搜索等场景。
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import inspect
+import json
+from typing import Any, Callable, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from loguru import logger
@@ -21,7 +23,7 @@ KNOWLEDGE_AGENT_SYSTEM_PROMPT = """你是知识检索助手，擅长从知识库
 
 你的职责：
 1. 分析用户的问题，提取关键检索词
-2. 调用 search_docs 工具搜索知识库
+2. 调用 workspace 绑定的 search_workspace 工具搜索索引
 3. 根据检索到的文档内容，组织一个准确、完整的回答
 4. 如果知识库中没有相关信息，诚实告知用户
 
@@ -38,19 +40,24 @@ class KnowledgeAgent:
     """
     知识检索 Agent
 
-    通过 RAG search_docs 工具进行知识库检索，
+    通过 RAG search_workspace 工具进行项目知识检索，
     支持多轮检索-整合-回答的 ReAct 流程。
     """
 
     AGENT_ID = "knowledge_agent"
     DESCRIPTION = "知识检索与文档查询 Agent，通过 RAG 搜索知识库回答问题"
 
-    def __init__(self, llm_complexity: Complexity = Complexity.L1):
+    def __init__(
+        self,
+        llm_complexity: Complexity = Complexity.L1,
+        workspace_search: Optional[Callable[[str, int], Any]] = None,
+    ):
         """
         Args:
             llm_complexity: LLM 复杂度级别，知识检索通常 L1 即可
         """
         self._llm = get_llm_by_complexity(llm_complexity)
+        self._workspace_search = workspace_search
         self._tools = self._build_tools()
         logger.info("KnowledgeAgent 初始化完成")
 
@@ -60,7 +67,7 @@ class KnowledgeAgent:
             {
                 "type": "function",
                 "function": {
-                    "name": "search_docs",
+                    "name": "search_workspace",
                     "description": "在知识库中搜索相关文档。输入查询关键词，返回匹配的文档片段。",
                     "parameters": {
                         "type": "object",
@@ -126,13 +133,13 @@ class KnowledgeAgent:
 
             return response.content or "未找到相关信息"
 
-        except Exception as e:
-            logger.error("KnowledgeAgent 执行异常: {}", str(e))
-            return f"知识检索过程中出现错误: {str(e)}"
+        except Exception:
+            logger.error("knowledge_agent_run_failed exception_type=internal_error")
+            return "知识检索暂时不可用，请稍后重试。"
 
     async def _execute_search(self, tool_calls: list) -> list:
         """
-        执行 RAG search_docs 调用。
+        执行 workspace 绑定的 RAG search_workspace 调用。
 
         Args:
             tool_calls: LLM 生成的工具调用列表
@@ -148,15 +155,23 @@ class KnowledgeAgent:
             tool_args = call.get("args", {})
             tool_id = call.get("id", "")
 
-            if tool_name == "search_docs":
+            if tool_name == "search_workspace":
                 try:
-                    from engine.core.rag import search_docs
                     query = tool_args.get("query", "")
                     top_k = tool_args.get("top_k", 5)
-                    docs = await search_docs(query=query, top_k=top_k)
-                    content = self._format_search_results(docs)
-                except Exception as e:
-                    content = f"[ERROR] 知识库检索失败: {str(e)}"
+                    if self._workspace_search is None:
+                        raise RuntimeError("workspace-scoped RAG search is unavailable")
+                    docs = self._workspace_search(query, top_k)
+                    if inspect.isawaitable(docs):
+                        docs = await docs
+                    content = (
+                        json.dumps(docs, ensure_ascii=False, sort_keys=True)
+                        if isinstance(docs, dict)
+                        else self._format_search_results(docs)
+                    )
+                except Exception:
+                    logger.error("knowledge_agent_search_failed exception_type=internal_error")
+                    content = "[ERROR] 知识库检索暂时不可用，请稍后重试。"
             else:
                 content = f"[ERROR] 未知工具: {tool_name}"
 

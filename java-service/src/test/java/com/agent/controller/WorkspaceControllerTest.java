@@ -2,6 +2,11 @@ package com.agent.controller;
 
 import com.agent.client.PythonAgentGatewayException;
 import com.agent.client.PythonWorkspaceClient;
+import com.agent.client.RagCitation;
+import com.agent.client.RagIndexState;
+import com.agent.client.RagIndexStatusResponse;
+import com.agent.client.RagQueryRequest;
+import com.agent.client.RagQueryResponse;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -10,6 +15,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
@@ -94,6 +100,96 @@ class WorkspaceControllerTest {
                 .andExpect(content().string(not(containsString("secret upstream body"))));
     }
 
+    @Test
+    void exposesTypedRagWorkspaceRoutes() throws Exception {
+        StubPythonWorkspaceClient client = new StubPythonWorkspaceClient();
+        RagIndexStatusResponse ready = new RagIndexStatusResponse(
+                "alpha", RagIndexState.READY, "rag-1", null,
+                1, 5, 20, "2026-10-27T09:00:00Z", null);
+        RagIndexStatusResponse queued = new RagIndexStatusResponse(
+                "alpha", RagIndexState.QUEUED, null, "job-1",
+                1, 0, 0, null, null);
+        RagQueryResponse query = new RagQueryResponse(
+                "alpha", "rag-1", List.of(new RagCitation(
+                "cite-1", 1, "service", "service/docs/domain.md", 2, 4, "excerpt",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")));
+        client.ragStatusResult = Mono.just(ResponseEntity.ok(ready));
+        client.ragRebuildResult = Mono.just(ResponseEntity.accepted().body(queued));
+        client.ragQueryResult = Mono.just(ResponseEntity.ok(query));
+        MockMvc mvc = mvc(client);
+
+        performAsync(mvc, get("/api/v1/workspaces/alpha/rag/index"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.state").value("ready"));
+        performAsync(mvc, post("/api/v1/workspaces/alpha/rag/index/rebuild"))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.job_id").value("job-1"));
+        performAsync(mvc, post("/api/v1/workspaces/alpha/rag/query")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"query\":\"domain\",\"top_k\":5}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.citations[0].virtual_path").value("service/docs/domain.md"));
+
+        assertThat(client.calls).containsExactly(
+                "rag-status:alpha", "rag-rebuild:alpha", "rag-query:alpha");
+        assertThat(client.ragQueryBody).isEqualTo(new RagQueryRequest("domain", 5));
+    }
+
+    @Test
+    void rejectsInvalidRagQueryBeforeCallingEngine() throws Exception {
+        StubPythonWorkspaceClient client = new StubPythonWorkspaceClient();
+        LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
+        validator.afterPropertiesSet();
+        MockMvc mvc = standaloneSetup(new WorkspaceController(client))
+                .setControllerAdvice(new ApiExceptionHandler())
+                .setValidator(validator)
+                .build();
+
+        mvc.perform(post("/api/v1/workspaces/alpha/rag/query")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"query\":\" \",\"top_k\":21}"))
+                .andExpect(status().isBadRequest());
+
+        assertThat(client.calls).isEmpty();
+    }
+
+    @Test
+    void enforcesRagQueryJsonBoundariesBeforeCallingEngine() throws Exception {
+        StubPythonWorkspaceClient client = new StubPythonWorkspaceClient();
+        client.ragQueryResult = Mono.just(ResponseEntity.ok(
+                new RagQueryResponse("alpha", "rag-1", List.of())));
+        LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
+        validator.afterPropertiesSet();
+        MockMvc mvc = standaloneSetup(new WorkspaceController(client))
+                .setControllerAdvice(new ApiExceptionHandler())
+                .setValidator(validator)
+                .build();
+
+        for (String invalid : List.of(
+                "{\"top_k\":1}",
+                "{\"query\":\" \",\"top_k\":1}",
+                "{\"query\":\"q\"}",
+                "{\"query\":\"q\",\"top_k\":21}",
+                "{\"query\":\"q\",\"top_k\":true}",
+                "{\"query\":\"q\",\"top_k\":1,\"secret\":\"x\"}",
+                "{\"query\":\"" + "x".repeat(4001) + "\",\"top_k\":1}"
+        )) {
+            mvc.perform(post("/api/v1/workspaces/alpha/rag/query")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(invalid))
+                    .andExpect(status().isBadRequest());
+        }
+
+        for (int topK : List.of(1, 20)) {
+            performAsync(mvc, post("/api/v1/workspaces/alpha/rag/query")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"query\":\"" + "x".repeat(4000)
+                                    + "\",\"top_k\":" + topK + "}"))
+                    .andExpect(status().isOk());
+        }
+        assertThat(client.calls).containsExactly("rag-query:alpha", "rag-query:alpha");
+    }
+
     private MockMvc mvc(PythonWorkspaceClient client) {
         return standaloneSetup(new WorkspaceController(client))
                 .setControllerAdvice(new ApiExceptionHandler())
@@ -119,6 +215,10 @@ class WorkspaceControllerTest {
         private Mono<ResponseEntity<JsonNode>> repositoryResult;
         private Mono<ResponseEntity<JsonNode>> scanResult;
         private Mono<ResponseEntity<JsonNode>> activateResult;
+        private Mono<ResponseEntity<RagIndexStatusResponse>> ragStatusResult;
+        private Mono<ResponseEntity<RagIndexStatusResponse>> ragRebuildResult;
+        private Mono<ResponseEntity<RagQueryResponse>> ragQueryResult;
+        private RagQueryRequest ragQueryBody;
         private JsonNode createBody;
         private JsonNode repositoryBody;
 
@@ -171,6 +271,27 @@ class WorkspaceControllerTest {
         public Mono<ResponseEntity<JsonNode>> activateWorkspace(String workspaceId) {
             calls.add("activate:" + workspaceId);
             return activateResult;
+        }
+
+        @Override
+        public Mono<ResponseEntity<RagIndexStatusResponse>> ragIndexStatus(String workspaceId) {
+            calls.add("rag-status:" + workspaceId);
+            return ragStatusResult;
+        }
+
+        @Override
+        public Mono<ResponseEntity<RagIndexStatusResponse>> rebuildRagIndex(String workspaceId) {
+            calls.add("rag-rebuild:" + workspaceId);
+            return ragRebuildResult;
+        }
+
+        @Override
+        public Mono<ResponseEntity<RagQueryResponse>> queryRag(
+                String workspaceId, RagQueryRequest request
+        ) {
+            calls.add("rag-query:" + workspaceId);
+            ragQueryBody = request;
+            return ragQueryResult;
         }
     }
 }

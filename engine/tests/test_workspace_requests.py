@@ -214,6 +214,7 @@ async def test_tools_resolves_active_and_explicit_workspaces(tmp_path):
         "grep_code",
         "read_file",
         "code_search",
+        "search_workspace",
         "preview_edit_file",
         "preview_create_file",
         "apply_workspace_change",

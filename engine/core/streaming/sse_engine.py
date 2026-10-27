@@ -84,6 +84,9 @@ async def sse_event_generator(
             elif kind == "on_custom_event" and name == "verification":
                 yield _sse_line("verification", _safe_verification(data))
 
+            elif kind == "on_custom_event" and name == "citation":
+                yield _sse_line("citation", _safe_citation(data))
+
             # ── 检测 __interrupt 信息（LangGraph v2 interrupt 事件）──
             elif kind == "on_chain_stream":
                 chunk_data = data.get("chunk")
@@ -208,3 +211,19 @@ def _safe_verification(data: Any) -> Dict[str, Any]:
             "truncated",
         },
     )
+
+
+def _safe_citation(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    citation = _safe_fields(
+        data.get("citation"),
+        {
+            "citation_id", "rank", "repository", "virtual_path", "start_line",
+            "end_line", "excerpt", "content_sha256",
+        },
+    )
+    return {
+        **_safe_fields(data, {"tool_call_id", "workspace_id", "index_generation"}),
+        "citation": citation,
+    }

@@ -78,6 +78,35 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .rail-actions { display: flex; gap: 8px; margin-top: 16px; }
 .rail-actions button { min-height: 40px; flex: 1; border: 1px solid var(--line); background: transparent; color: #b8c1c8; }
 .rail-actions .danger-link { color: var(--danger); }
+.knowledge-card { position: relative; margin-top: 14px; padding: 14px; overflow: hidden; border: 1px solid #2f3c45; background: linear-gradient(145deg, rgba(18,28,35,.96), rgba(9,15,20,.98)); }
+.knowledge-card::after { content: ""; position: absolute; width: 90px; height: 90px; right: -50px; bottom: -54px; border: 1px solid rgba(114,208,171,.17); border-radius: 50%; box-shadow: 0 0 0 13px rgba(114,208,171,.025), 0 0 0 28px rgba(114,208,171,.018); pointer-events: none; }
+.knowledge-heading { display: grid; grid-template-columns: 24px minmax(0,1fr) auto; align-items: center; gap: 9px; }
+.knowledge-heading > div { min-width: 0; display: grid; gap: 4px; }
+.knowledge-heading small { color: #71818c; font: 700 8px Consolas, monospace; letter-spacing: .14em; }
+.knowledge-heading strong { color: #d7ddd9; font-size: 12px; }
+.knowledge-orbit { width: 21px; height: 21px; position: relative; display: block; border: 1px solid #527565; border-radius: 50%; }
+.knowledge-orbit::before { content: ""; position: absolute; width: 5px; height: 5px; inset: 7px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 10px rgba(114,208,171,.55); }
+.knowledge-orbit::after { content: ""; position: absolute; width: 25px; height: 9px; left: -3px; top: 5px; border: 1px solid rgba(114,208,171,.45); border-radius: 50%; transform: rotate(-23deg); }
+.knowledge-state { color: #83bda5; font: 700 8px Consolas, monospace; letter-spacing: .08em; }
+.knowledge-card > p { margin: 11px 0 0; color: #89979f; font-size: 10px; line-height: 1.55; }
+.knowledge-card .knowledge-metrics { color: #aebbb6; font-family: Consolas, monospace; }
+.knowledge-actions { margin-top: 12px; }
+.knowledge-actions button { width: 100%; min-height: 36px; position: relative; z-index: 1; border: 1px solid #385548; background: rgba(16,35,28,.74); color: #9bd5bb; font-size: 10px; font-weight: 700; letter-spacing: .03em; }
+.knowledge-actions button:not(:disabled):hover { border-color: var(--mint); background: #142d24; }
+.knowledge-progress { height: 4px; position: relative; margin-top: 13px; background: #202a31; }
+.knowledge-progress > span { height: 100%; display: block; background: linear-gradient(90deg, #568f77, var(--mint)); }
+.knowledge-progress small { display: block; margin-top: 6px; color: #73828b; font: 9px Consolas, monospace; }
+.knowledge-queued .knowledge-orbit, .knowledge-building .knowledge-orbit, .knowledge-loading .knowledge-orbit { animation: orbit 2.2s linear infinite; }
+.knowledge-stale { border-color: #59482f; background: linear-gradient(145deg, #1d1912, #0d1217); }
+.knowledge-stale .knowledge-state, .knowledge-stale .knowledge-orbit::before { color: var(--amber-soft); background: var(--amber); }
+.knowledge-failed, .knowledge-unavailable { border-color: #513832; }
+.knowledge-failed .knowledge-state, .knowledge-unavailable .knowledge-state { color: var(--danger); }
+.knowledge-failed .knowledge-orbit, .knowledge-unavailable .knowledge-orbit { border-color: #70453d; }
+.knowledge-failed .knowledge-orbit::before, .knowledge-unavailable .knowledge-orbit::before { background: var(--danger); box-shadow: none; }
+.knowledge-loading { min-height: 74px; display: flex; align-items: center; gap: 10px; }
+.knowledge-loading > div { display: grid; gap: 5px; }
+.knowledge-loading strong { color: #cad2d1; font-size: 11px; }
+.knowledge-loading small { color: #70808a; font-size: 9px; }
 .local-note { margin-top: auto; display: flex; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); color: #b9c3ca; }
 .local-note > span { color: var(--mint); }
 .local-note p { margin: 0; font-size: 12px; }
@@ -106,6 +135,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visib
 .message-role { margin: 0 0 8px; color: var(--amber); font: 700 10px Consolas, monospace; letter-spacing: .16em; text-transform: uppercase; }
 .message > div { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.75; padding: 18px 20px; border: 1px solid var(--line); background: #111820; }
 .message.user > div { border-color: #554329; background: #211b13; }
+.citation-list { margin-top: 9px; border: 1px solid #293841; background: rgba(9,15,20,.82); }
+.citation-list summary { padding: 10px 13px; cursor: pointer; list-style: none; color: #9ec9b6; font: 700 10px Consolas, monospace; letter-spacing: .05em; }
+.citation-list summary::-webkit-details-marker { display: none; }
+.citation-list summary::before { content: "+"; display: inline-block; width: 18px; color: var(--mint); }
+.citation-list[open] summary::before { content: "−"; }
+.citation-list summary:hover { background: #101a20; }
+.citation-grid { display: grid; gap: 8px; padding: 0 9px 9px; }
+.citation-card { overflow: hidden; border: 1px solid #2d3c45; background: #0a1015; }
+.citation-card header { min-height: 38px; display: grid; grid-template-columns: 25px minmax(0,1fr); align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #202e36; }
+.citation-card header span { width: 24px; height: 24px; display: grid; place-items: center; border: 1px solid #426452; color: var(--mint); font: 700 9px Consolas, monospace; }
+.citation-card header code { overflow-wrap: anywhere; color: #a9b6bc; font: 10px/1.45 Consolas, monospace; }
+.citation-card pre { max-height: 180px; margin: 0; padding: 10px 12px; overflow: auto; color: #bec8c6; white-space: pre-wrap; font: 10px/1.6 Consolas, monospace; }
 .typing span { animation: blink 1s steps(2) infinite; }
 .activity-ledger { max-width: 900px; margin: 30px auto 0; border: 1px solid var(--line); background: #0c1217; }
 .ledger-title, .tool-row { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
@@ -205,6 +246,7 @@ kbd { border: 1px solid #46515a; padding: 2px 5px; background: #171f27; }
 
 @keyframes pulse { 50% { opacity: .35; transform: scale(.85); } }
 @keyframes blink { 50% { opacity: .25; } }
+@keyframes orbit { to { transform: rotate(360deg); } }
 
 @media (max-width: 900px) {
   .workbench { grid-template-columns: minmax(0,1fr); }

@@ -17,12 +17,13 @@
 - Java 提供版本化的统一聊天 SSE 与 Workspace API，并在容器模式中作为唯一公开业务入口；
 - Java 到 Python 的 SSE 代理保留消息、工具、审批、文件变更和验证事件，支持 `/api/v1/agent/chat/resume` 恢复审批中的任务，区分连接前 HTTP 错误与流中失败，并向上游传播取消；
 - LangGraph checkpoint 与受控修改提案持久化到本地 SQLite；Engine 重启后，工作台会按 Workspace 恢复待审批 Diff，并继续使用原会话批准或拒绝；
-- React 产品工作台“**小瑶开发助手**”：管理本地 Workspace、扫描项目、流式对话、查看工具施工记录，在内联 Diff 卡片中批准或拒绝单次修改，并展示写入和自动测试结果；页面只调用 Java `/api/v1`。
+- Workspace RAG 使用本地 SQLite FTS5 按 Workspace 与代际隔离索引 Java、Python、前端源码及常用文档；支持显式后台重建、未变文件复用、增删更新、重启持久化和带行号来源引用；
+- React 产品工作台“**小瑶开发助手**”：管理本地 Workspace、扫描项目、构建知识索引、流式对话、查看来源与工具施工记录，在内联 Diff 卡片中批准或拒绝单次修改，并展示写入和自动测试结果；页面只调用 Java `/api/v1`。
 
 下列能力仍在开发中，请不要把现有占位模块视为可用功能：
 
 - 面向多 Engine 实例的共享 checkpoint、分布式审批锁，以及长期审计记录；
-- Workspace RAG 索引、增量更新与来源引用；
+- 向量语义检索、外部知识源同步和多实例共享 RAG 索引；
 - 面向多人或公网部署的认证、授权和租户隔离。
 
 因此，本版本只适合可信机器上的本地开发与评估。不要直接暴露到公网。
@@ -36,9 +37,9 @@ React 工作台 / API 客户端
 Java Spring Boot ───────────── MySQL / Redis
        │ 内部 REST / SSE
        ▼
-Python FastAPI + LangGraph ── Workspace Registry / Scanner
-       │                    └─ Workspace 隔离的读取、变更提案、审批写入与测试运行时
-       ├─ SQLite（checkpoint 与待审批变更提案）
+Python FastAPI + LangGraph ── Workspace Registry / Scanner / RAG
+       │                    └─ Workspace 隔离的读取、检索、变更提案、审批写入与测试运行时
+       ├─ SQLite（checkpoint、待审批提案与本地知识索引）
        └─ Redis（动态配置与现有基础设施）
 ```
 
@@ -50,6 +51,7 @@ Python FastAPI + LangGraph ── Workspace Registry / Scanner
 - 仓库注册路径可以是绝对宿主机/容器路径，但必须位于明确的允许根目录内。注册后，只读工具仅接受仓库内的虚拟相对路径，并拒绝绝对路径、盘符/UNC 路径、`..` 越界、损坏链接，以及通过 symlink/junction（Windows reparse point）逃逸；无法检查或解析时 fail closed。
 - 本地进程模式下，代码修改采用“预览提案 → 展示 Diff → 单次人工批准 → 原子写入 → 固定测试配置验证”的闭环；提案绑定 Workspace、目标文件内容哈希和审批 ID，目标在批准前发生变化时会拒绝写入。测试命令及参数由服务端白名单确定，不接受模型提供任意 shell 命令。
 - checkpoint 与服务端变更提案写入 `WORKSPACE_METADATA_DIR` 下的 SQLite 数据库；单 Engine 进程重启后可以恢复待审批任务。SQLite 方案面向本地单实例，尚不支持多个 Engine 实例共享审批锁，也不等同于长期审计系统。
+- RAG 只索引允许根目录内已登记仓库的受支持文本文件，排除隐藏目录、依赖/构建产物、常见密钥文件、二进制和超限文件。索引内容保留在本机 SQLite，默认不调用外部 embedding 服务；当前 FTS5 是关键词检索，不等同于向量语义检索。
 - 当前没有用户认证。允许根目录应尽量小，不要挂载整个用户目录、磁盘根目录或敏感凭据目录。
 
 ## Docker Compose 快速启动
@@ -92,6 +94,7 @@ curl -X POST http://127.0.0.1:8081/api/v1/workspaces/local-dev/repositories \
 
 curl -X POST http://127.0.0.1:8081/api/v1/workspaces/local-dev/scan
 curl -X POST http://127.0.0.1:8081/api/v1/workspaces/local-dev/activate
+curl -X POST http://127.0.0.1:8081/api/v1/workspaces/local-dev/rag/index/rebuild
 
 curl -N -X POST http://127.0.0.1:8081/api/v1/agent/chat \
   -H "Content-Type: application/json" \
@@ -132,6 +135,8 @@ curl -X POST http://127.0.0.1:8000/workspaces/local-dev/repositories \
 
 Windows 请求体可使用 `C:\\Users\\you\\code\\order-service`。所有仓库仍必须落在 `WORKSPACE_ALLOWED_ROOTS` 之内。
 
+登记仓库后，可在“小瑶开发助手”侧栏点击“构建知识索引”。重建请求返回 `202 Accepted`，页面会轮询构建状态；索引就绪后，Agent 可以调用只读的 `search_workspace`，来源会以 `仓库/相对路径:行号` 显示在对应回答下方。修改仓库登记会产生新的 Workspace 代际，旧索引不会跨代继续提供结果，需要重新构建。
+
 ## React 工作台本地开发
 
 先启动 Python Engine 和 Java 服务，确认 Java 可通过 `http://127.0.0.1:8081/api/v1` 访问；然后在仓库根目录运行：
@@ -169,6 +174,7 @@ uv run --project engine --frozen --extra dev python scripts/verify.py
 | `WORKSPACE_METADATA_DIR` | Workspace 注册元数据目录 | `~/.dev-copilot` |
 | `CHECKPOINT_DB_PATH` | LangGraph checkpoint SQLite 路径 | `${WORKSPACE_METADATA_DIR}/checkpoints.sqlite3` |
 | `PROPOSAL_DB_PATH` | 受控修改提案 SQLite 路径 | `${WORKSPACE_METADATA_DIR}/proposals.sqlite3` |
+| `RAG_DB_PATH` | Workspace 本地知识索引 SQLite 路径 | `${WORKSPACE_METADATA_DIR}/rag.sqlite3` |
 | `APP_HOST` | Python 监听地址 | `127.0.0.1` |
 | `APP_PORT` | Python 监听端口 | `8000` |
 
@@ -181,8 +187,9 @@ dev-copilot/
 ├── docker-compose.yml        # 本地全容器编排与安全网络边界
 ├── .env.example              # 无凭据的环境变量模板
 ├── engine/                   # Python FastAPI / LangGraph Agent 引擎
-│   ├── api/                  # chat、tasks、tools、workspaces 路由
+│   ├── api/                  # chat、tasks、tools、workspaces、rag 路由
 │   ├── core/workspace/       # Registry、PathGuard、Scanner、受控变更服务
+│   ├── core/rag/             # 增量切块、SQLite FTS5 索引与来源引用
 │   ├── core/mcp/             # Workspace 隔离的读取、变更提案和审批工具
 │   ├── core/execution/       # 固定白名单测试配置与受限进程执行
 │   ├── core/hitl/            # LangGraph 人工审批门控

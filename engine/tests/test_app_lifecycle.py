@@ -62,6 +62,7 @@ def configure_lifespan_dependencies(tmp_path, monkeypatch, dynamic_config, calls
         workspace_allowed_root_paths=(),
         resolved_checkpoint_db_path=tmp_path / "checkpoints.sqlite3",
         resolved_proposal_db_path=tmp_path / "proposals.sqlite3",
+        resolved_rag_db_path=tmp_path / "rag.sqlite3",
     )
 
     @asynccontextmanager
@@ -105,6 +106,7 @@ async def test_lifespan_owns_workspace_runtime_and_closes_all_managers(tmp_path,
         workspace_allowed_root_paths=(allowed_root.resolve(),),
         resolved_checkpoint_db_path=metadata_root / "checkpoints.sqlite3",
         resolved_proposal_db_path=metadata_root / "proposals.sqlite3",
+        resolved_rag_db_path=metadata_root / "rag.sqlite3",
     )
     registry_arguments = []
 
@@ -239,6 +241,7 @@ async def test_lifespan_closes_manager_initialized_during_teardown(tmp_path, mon
         workspace_allowed_root_paths=(),
         resolved_checkpoint_db_path=tmp_path / "checkpoints.sqlite3",
         resolved_proposal_db_path=tmp_path / "proposals.sqlite3",
+        resolved_rag_db_path=tmp_path / "rag.sqlite3",
     )
 
     @asynccontextmanager
@@ -372,3 +375,6 @@ def test_application_mounts_workspace_routes():
     assert "/workspaces/{workspace_id}/repositories" in paths
     assert "/workspaces/{workspace_id}/scan" in paths
     assert "/workspaces/{workspace_id}/activate" in paths
+    assert "/workspaces/{workspace_id}/rag/index" in paths
+    assert "/workspaces/{workspace_id}/rag/index/rebuild" in paths
+    assert "/workspaces/{workspace_id}/rag/query" in paths

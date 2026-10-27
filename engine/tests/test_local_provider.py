@@ -49,6 +49,7 @@ async def test_local_provider_exposes_read_tools_and_controlled_change_tools(tmp
         "grep_code",
         "read_file",
         "code_search",
+        "search_workspace",
         "preview_edit_file",
         "preview_create_file",
         "apply_workspace_change",

@@ -63,6 +63,7 @@ async def get_workspace_manager(request: Request, workspace: Workspace) -> MCPMa
                 path_guard=request.app.state.workspace_registry.path_guard,
                 proposal_store=request.app.state.proposal_store,
             ),
+            rag_service=getattr(request.app.state, "rag_service", None),
         )
         manager = MCPManager(
             [{"name": "local", "type": "local", "provider": provider}]

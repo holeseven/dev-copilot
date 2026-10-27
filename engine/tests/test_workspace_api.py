@@ -218,13 +218,16 @@ async def test_workspace_manager_passes_registry_path_guard_to_local_provider(
 
     proposal_store = object()
 
+    rag_service = object()
+
     class CapturingProvider:
-        def __init__(self, name, received_workspace, path_guard, *, change_service):
+        def __init__(self, name, received_workspace, path_guard, *, change_service, rag_service):
             captured.update(
                 name=name,
                 workspace=received_workspace,
                 path_guard=path_guard,
                 proposal_store=change_service.proposal_store,
+                rag_service=rag_service,
             )
 
     class FakeManager:
@@ -239,6 +242,7 @@ async def test_workspace_manager_passes_registry_path_guard_to_local_provider(
     app = FastAPI()
     app.state.workspace_registry = registry
     app.state.proposal_store = proposal_store
+    app.state.rag_service = rag_service
     app.state.mcp_managers = {}
     app.state.workspace_manager_lock = asyncio.Lock()
 
@@ -249,4 +253,5 @@ async def test_workspace_manager_passes_registry_path_guard_to_local_provider(
         "workspace": workspace,
         "path_guard": registry.path_guard,
         "proposal_store": proposal_store,
+        "rag_service": rag_service,
     }

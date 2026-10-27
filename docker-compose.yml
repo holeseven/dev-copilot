@@ -63,6 +63,7 @@ services:
       WORKSPACE_METADATA_DIR: /data/dev-copilot
       CHECKPOINT_DB_PATH: "${CHECKPOINT_DB_PATH:-/data/dev-copilot/checkpoints.sqlite3}"
       PROPOSAL_DB_PATH: "${PROPOSAL_DB_PATH:-/data/dev-copilot/proposals.sqlite3}"
+      RAG_DB_PATH: "${RAG_DB_PATH:-/data/dev-copilot/rag.sqlite3}"
     volumes:
       - type: bind
         source: "${DEV_COPILOT_ALLOWED_ROOT:?required}"
