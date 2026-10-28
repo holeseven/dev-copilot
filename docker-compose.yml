@@ -49,7 +49,7 @@ services:
       - /tmp
     environment:
       REDIS_URL: redis://redis:6379/0
-      LLM_API_KEY: "${LLM_API_KEY:-}"
+      LLM_API_KEY: "${LLM_API_KEY:?required}"
       LLM_BASE_URL: "${LLM_BASE_URL:-https://api.deepseek.com/v1}"
       LLM_MODEL: "${LLM_MODEL:-deepseek-chat}"
       LLM_MODEL_L2: "${LLM_MODEL_L2:-}"

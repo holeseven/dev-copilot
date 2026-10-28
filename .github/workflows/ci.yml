@@ -68,6 +68,7 @@ jobs:
       DEV_COPILOT_ALLOWED_ROOT: ${{ github.workspace }}
       DEV_COPILOT_MYSQL_ROOT_PASSWORD: ci-only-root-password
       DEV_COPILOT_DB_PASSWORD: ci-only-app-password
+      LLM_API_KEY: ci-only-placeholder
     steps:
       - name: Check out repository
         uses: actions/checkout@v7

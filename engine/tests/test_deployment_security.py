@@ -199,6 +199,7 @@ def test_every_supported_engine_setting_is_explicitly_forwarded() -> None:
     assert supported_settings <= compose_environment.keys()
     for setting in supported_settings:
         assert f"${{{setting}" in str(compose_environment[setting])
+    assert compose_environment["LLM_API_KEY"] == "${LLM_API_KEY:?required}"
 
 
 def test_database_name_matches_the_fixed_schema_contract() -> None:

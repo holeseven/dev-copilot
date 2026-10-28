@@ -178,7 +178,7 @@ uv run --project engine --frozen --extra dev python scripts/verify.py
 | `DEV_COPILOT_DB_PASSWORD` | Java 应用数据库密码 | Compose 必填 |
 | `DEV_COPILOT_ENGINE_BASE_URL` | Java 访问 Python Engine 的内部地址 | 本地 `http://127.0.0.1:8000`；Compose 固定为 `http://engine:8000` |
 | `DEV_COPILOT_ALLOWED_ROOT` | Compose 允许访问的宿主代码根目录 | Compose 必填；默认只读，仅显式 write override 可写 |
-| `LLM_API_KEY` | OpenAI 兼容模型 Key | 实际问答必填 |
+| `LLM_API_KEY` | OpenAI 兼容模型 Key | Compose 启动必填 |
 | `LLM_BASE_URL` | OpenAI 兼容接口地址 | `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | 默认/L1 模型 | `deepseek-chat` |
 | `LLM_MODEL_L2` | L2 模型；空值时复用默认模型 | 空 |

@@ -56,6 +56,7 @@ def test_ci_validates_and_builds_default_and_writable_container_releases():
         "DEV_COPILOT_ALLOWED_ROOT": "${{ github.workspace }}",
         "DEV_COPILOT_MYSQL_ROOT_PASSWORD": "ci-only-root-password",
         "DEV_COPILOT_DB_PASSWORD": "ci-only-app-password",
+        "LLM_API_KEY": "ci-only-placeholder",
     }
     release_step = job["steps"][1]
     commands = release_step["run"]
