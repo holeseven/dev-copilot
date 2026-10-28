@@ -221,13 +221,23 @@ async def test_workspace_manager_passes_registry_path_guard_to_local_provider(
     rag_service = object()
 
     class CapturingProvider:
-        def __init__(self, name, received_workspace, path_guard, *, change_service, rag_service):
+        def __init__(
+            self,
+            name,
+            received_workspace,
+            path_guard,
+            *,
+            change_service,
+            rag_service,
+            write_enabled,
+        ):
             captured.update(
                 name=name,
                 workspace=received_workspace,
                 path_guard=path_guard,
                 proposal_store=change_service.proposal_store,
                 rag_service=rag_service,
+                write_enabled=write_enabled,
             )
 
     class FakeManager:
@@ -254,4 +264,5 @@ async def test_workspace_manager_passes_registry_path_guard_to_local_provider(
         "path_guard": registry.path_guard,
         "proposal_store": proposal_store,
         "rag_service": rag_service,
+        "write_enabled": False,
     }

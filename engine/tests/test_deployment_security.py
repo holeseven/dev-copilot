@@ -13,6 +13,12 @@ def load_compose() -> dict:
     return yaml.safe_load((REPOSITORY_ROOT / "docker-compose.yml").read_text("utf-8"))
 
 
+def load_write_override() -> dict:
+    return yaml.safe_load(
+        (REPOSITORY_ROOT / "docker-compose.write.yml").read_text("utf-8")
+    )
+
+
 def test_datastores_are_private_on_an_internal_backend_network() -> None:
     compose = load_compose()
     services = compose["services"]
@@ -44,7 +50,7 @@ def test_java_is_the_only_public_application_api() -> None:
         "http://java-service:8081"
     )
     assert services["web"]["depends_on"]["java-service"] == {
-        "condition": "service_started"
+        "condition": "service_healthy"
     }
     assert services["engine"]["healthcheck"]["test"][0:3] == [
         "CMD",
@@ -52,6 +58,34 @@ def test_java_is_the_only_public_application_api() -> None:
         "-c",
     ]
     assert "127.0.0.1:8000/health" in services["engine"]["healthcheck"]["test"][3]
+    java_healthcheck = services["java-service"]["healthcheck"]
+    assert java_healthcheck["test"] == [
+        "CMD",
+        "curl",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "http://127.0.0.1:8081/actuator/health",
+    ]
+    assert java_healthcheck["start_period"] == "20s"
+
+    java_dockerfile = (REPOSITORY_ROOT / "java-service/Dockerfile").read_text("utf-8")
+    assert "apt-get install -y --no-install-recommends curl" in java_dockerfile
+    assert "rm -rf /var/lib/apt/lists/*" in java_dockerfile
+
+    pom = (REPOSITORY_ROOT / "java-service/pom.xml").read_text("utf-8")
+    assert "spring-boot-starter-actuator" in pom
+    application = yaml.safe_load(
+        (REPOSITORY_ROOT / "java-service/src/main/resources/application.yml").read_text(
+            "utf-8"
+        )
+    )
+    assert application["management"]["endpoints"]["web"]["exposure"]["include"] == (
+        "health"
+    )
+    assert application["management"]["endpoint"]["health"]["show-details"] == (
+        "never"
+    )
 
 
 def test_mysql_credentials_must_be_injected_and_java_never_defaults_to_root() -> None:
@@ -101,6 +135,42 @@ def test_engine_mounts_only_the_selected_workspace_and_persists_metadata() -> No
     } in volumes
     assert engine["environment"]["WORKSPACE_ALLOWED_ROOTS"] == '["/workspace"]'
     assert engine["environment"]["WORKSPACE_METADATA_DIR"] == "/data/dev-copilot"
+    assert engine["environment"]["WORKSPACE_WRITE_ENABLED"] == "false"
+
+
+def test_writable_development_override_is_explicit_and_scoped_to_engine() -> None:
+    override = load_write_override()
+
+    assert set(override) == {"services"}
+    assert set(override["services"]) == {"engine"}
+    engine = override["services"]["engine"]
+    assert engine["build"] == {"target": "write-runtime"}
+    assert engine["environment"] == {"WORKSPACE_WRITE_ENABLED": "true"}
+    assert engine["volumes"] == [
+        {
+            "type": "bind",
+            "source": "${DEV_COPILOT_ALLOWED_ROOT:?required}",
+            "target": "/workspace",
+            "read_only": False,
+        }
+    ]
+    assert "ports" not in engine
+    assert "privileged" not in engine
+
+
+def test_write_runtime_provides_fixed_multilanguage_test_tools() -> None:
+    compose_engine = load_compose()["services"]["engine"]
+    assert compose_engine["build"]["target"] == "runtime"
+
+    dockerfile = (REPOSITORY_ROOT / "engine/Dockerfile").read_text("utf-8")
+    assert "FROM node:20.19-bookworm-slim AS node-toolchain" in dockerfile
+    assert "FROM python:3.12-slim-bookworm AS runtime" in dockerfile
+    assert "FROM runtime AS write-runtime" in dockerfile
+    assert "openjdk-17-jdk-headless" in dockerfile
+    assert "maven" in dockerfile
+    assert "COPY --from=node-toolchain /usr/local/bin/node" in dockerfile
+    assert "uv sync --frozen --extra dev" in dockerfile
+    assert dockerfile.rstrip().endswith("FROM runtime AS default")
 
 
 def test_every_supported_engine_setting_is_explicitly_forwarded() -> None:

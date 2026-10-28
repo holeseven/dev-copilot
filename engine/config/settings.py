@@ -50,6 +50,10 @@ class Settings(BaseSettings):
         default=None,
         description="允许注册的工作区根目录（JSON 数组或系统路径分隔符分隔）",
     )
+    workspace_write_enabled: bool = Field(
+        default=False,
+        description="显式启用受控 Workspace 写入；默认只暴露只读工具",
+    )
     # 动态配置在 Redis 中存放的 Hash key
     dynamic_config_key: str = Field(default="dev_copilot:config", description="动态配置 Hash key")
     # 动态配置本地缓存刷新间隔（秒）

@@ -49,7 +49,7 @@ Python FastAPI + LangGraph ── Workspace Registry / Scanner / RAG
 - Redis 与 MySQL 只加入 Compose 内部网络，不发布宿主端口。
 - `DEV_COPILOT_ALLOWED_ROOT` 以只读方式挂载为容器内 `/workspace`；注册表等可写元数据保存在独立 `engine-metadata` volume。
 - 仓库注册路径可以是绝对宿主机/容器路径，但必须位于明确的允许根目录内。注册后，只读工具仅接受仓库内的虚拟相对路径，并拒绝绝对路径、盘符/UNC 路径、`..` 越界、损坏链接，以及通过 symlink/junction（Windows reparse point）逃逸；无法检查或解析时 fail closed。
-- 本地进程模式下，代码修改采用“预览提案 → 展示 Diff → 单次人工批准 → 原子写入 → 固定测试配置验证”的闭环；提案绑定 Workspace、目标文件内容哈希和审批 ID，目标在批准前发生变化时会拒绝写入。测试命令及参数由服务端白名单确定，不接受模型提供任意 shell 命令。
+- Engine 默认 `WORKSPACE_WRITE_ENABLED=false`，只向模型暴露读取与检索工具；即使直接调用隐藏的变更工具也会拒绝。显式启用后，代码修改仍采用“预览提案 → 展示 Diff → 单次人工批准 → 原子写入 → 固定测试配置验证”的闭环；提案绑定 Workspace、目标文件内容哈希和审批 ID，目标在批准前发生变化时会拒绝写入。测试命令及参数由服务端白名单确定，不接受模型提供任意 shell 命令。
 - checkpoint 与服务端变更提案写入 `WORKSPACE_METADATA_DIR` 下的 SQLite 数据库；单 Engine 进程重启后可以恢复待审批任务。SQLite 方案面向本地单实例，尚不支持多个 Engine 实例共享审批锁，也不等同于长期审计系统。
 - RAG 只索引允许根目录内已登记仓库的受支持文本文件，排除隐藏目录、依赖/构建产物、常见密钥文件、二进制和超限文件。索引内容保留在本机 SQLite，默认不调用外部 embedding 服务；当前 FTS5 是关键词检索，不等同于向量语义检索。
 - 当前没有用户认证。允许根目录应尽量小，不要挂载整个用户目录、磁盘根目录或敏感凭据目录。
@@ -79,7 +79,13 @@ docker compose up -d --build
 
 启动完成后打开“小瑶开发助手”：<http://127.0.0.1:3000>。前端容器只代理版本化的 `/api/v1` 到 Java；Java API 仍可在 <http://127.0.0.1:8081/api/v1> 直接访问。两个入口都只绑定宿主机 loopback。Python Engine 不发布宿主端口，只接受容器间调用，同时保留访问外部模型 API 的网络出口。
 
-安全 Compose 当前把 `/workspace` 挂载为只读，因此容器模式可完成项目登记、扫描、代码分析和对话，但不能实际写入受控变更。需要体验修改闭环时，请使用下面的本地进程开发模式，并只把确实允许修改的代码目录加入 `WORKSPACE_ALLOWED_ROOTS`。
+安全 Compose 把 `/workspace` 挂载为只读，并明确关闭 Engine 写工具，因此默认容器模式可完成项目登记、扫描、代码分析和对话，但不能写入代码。仅当你确认 `DEV_COPILOT_ALLOWED_ROOT` 中的代码允许被修改时，才使用显式可写 override：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.write.yml up -d --build
+```
+
+该 override 只把 Engine 的 `/workspace` bind 改为可写并设置 `WORKSPACE_WRITE_ENABLED=true`；不会新增端口、不会启用 privileged，也不会绕过逐项 Diff 审批、内容哈希、原子写入或固定测试配置。停止后重新使用普通 `docker compose up` 即回到默认只读模式。
 
 在 Docker 模式注册仓库时必须使用**容器路径**。若宿主目录 `${DEV_COPILOT_ALLOWED_ROOT}` 下有 `order-service`，请求应为：
 
@@ -102,7 +108,7 @@ curl -N -X POST http://127.0.0.1:8081/api/v1/agent/chat \
   -d '{"message":"分析项目入口","session_id":"demo-1","workspace_id":"local-dev"}'
 ```
 
-Compose 没有发布 Redis/MySQL 端口，所以不要使用 `docker compose up redis mysql` 后再让宿主机进程连接它们。当前本地进程开发需自行提供 `localhost` Redis/MySQL；项目后续会提供单独的开发 override。
+Compose 没有发布 Redis/MySQL 端口，所以不要使用 `docker compose up redis mysql` 后再让宿主机进程连接它们。当前本地进程开发需自行提供 `localhost` Redis/MySQL。
 
 ## Python 本地开发
 
@@ -117,6 +123,8 @@ export LLM_API_KEY="你的Key"
 export REDIS_URL="redis://127.0.0.1:6379/0"
 export WORKSPACE_ALLOWED_ROOTS='["/absolute/path/to/code"]'
 export WORKSPACE_METADATA_DIR="$HOME/.dev-copilot"
+# 只有确实需要受控写入时才显式启用：
+export WORKSPACE_WRITE_ENABLED="true"
 
 uv run --project engine --frozen uvicorn engine.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -169,13 +177,14 @@ uv run --project engine --frozen --extra dev python scripts/verify.py
 | `DEV_COPILOT_DB_USERNAME` | Java 应用数据库账户 | `dev_copilot` |
 | `DEV_COPILOT_DB_PASSWORD` | Java 应用数据库密码 | Compose 必填 |
 | `DEV_COPILOT_ENGINE_BASE_URL` | Java 访问 Python Engine 的内部地址 | 本地 `http://127.0.0.1:8000`；Compose 固定为 `http://engine:8000` |
-| `DEV_COPILOT_ALLOWED_ROOT` | Compose 允许读取的宿主代码根目录 | Compose 必填、只读挂载 |
+| `DEV_COPILOT_ALLOWED_ROOT` | Compose 允许访问的宿主代码根目录 | Compose 必填；默认只读，仅显式 write override 可写 |
 | `LLM_API_KEY` | OpenAI 兼容模型 Key | 实际问答必填 |
 | `LLM_BASE_URL` | OpenAI 兼容接口地址 | `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | 默认/L1 模型 | `deepseek-chat` |
 | `LLM_MODEL_L2` | L2 模型；空值时复用默认模型 | 空 |
 | `REDIS_URL` | Python Redis 地址 | `redis://localhost:6379/0` |
 | `WORKSPACE_ALLOWED_ROOTS` | Python 本地模式允许根目录；JSON 数组或系统路径分隔列表 | 回退到 `WORKSPACE_DIR` |
+| `WORKSPACE_WRITE_ENABLED` | 是否暴露受控变更与审批写入工具 | `false`；仅可信本地开发显式设为 `true` |
 | `WORKSPACE_METADATA_DIR` | Workspace 注册元数据目录 | `~/.dev-copilot` |
 | `CHECKPOINT_DB_PATH` | LangGraph checkpoint SQLite 路径 | `${WORKSPACE_METADATA_DIR}/checkpoints.sqlite3` |
 | `PROPOSAL_DB_PATH` | 受控修改提案 SQLite 路径 | `${WORKSPACE_METADATA_DIR}/proposals.sqlite3` |
@@ -190,6 +199,7 @@ uv run --project engine --frozen --extra dev python scripts/verify.py
 ```text
 dev-copilot/
 ├── docker-compose.yml        # 本地全容器编排与安全网络边界
+├── docker-compose.write.yml  # 显式启用受控写入的最小 override
 ├── .env.example              # 无凭据的环境变量模板
 ├── engine/                   # Python FastAPI / LangGraph Agent 引擎
 │   ├── api/                  # chat、tasks、tools、workspaces、rag 路由
@@ -219,5 +229,7 @@ dev-copilot/
 ## License
 
 [MIT License](LICENSE)
+
+参与开发请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
 作者：lxy

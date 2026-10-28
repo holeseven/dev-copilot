@@ -1,0 +1,14 @@
+# @author lxy
+# Explicit opt-in for controlled writes to the selected workspace only.
+
+services:
+  engine:
+    build:
+      target: write-runtime
+    environment:
+      WORKSPACE_WRITE_ENABLED: "true"
+    volumes:
+      - type: bind
+        source: "${DEV_COPILOT_ALLOWED_ROOT:?required}"
+        target: /workspace
+        read_only: false

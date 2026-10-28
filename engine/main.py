@@ -95,6 +95,9 @@ async def _runtime_lifespan(app: FastAPI, settings, checkpointer):
     )
     app.state.agent_graph = build_agent_graph(checkpointer=checkpointer)
     app.state.approval_coordinator = ApprovalCoordinator()
+    app.state.workspace_write_enabled = getattr(
+        settings, "workspace_write_enabled", False
+    )
     app.state.approval_runs = {}
     app.state.approval_runs_lock = asyncio.Lock()
     app.state.dispatcher = get_agent_dispatcher()

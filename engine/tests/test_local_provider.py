@@ -29,11 +29,12 @@ def _workspace(tmp_path):
     )
 
 
-def _provider(tmp_path):
+def _provider(tmp_path, *, write_enabled=True):
     return LocalDevToolProvider(
         "local",
         _workspace(tmp_path),
         path_guard=WorkspacePathGuard.from_roots((tmp_path,)),
+        write_enabled=write_enabled,
     )
 
 
@@ -60,6 +61,47 @@ async def test_local_provider_exposes_read_tools_and_controlled_change_tools(tmp
     assert set(schemas[0]["parameters"]["properties"]) == {"path"}
     assert set(schemas[1]["parameters"]["properties"]) == {"glob_pattern", "path"}
     assert all(schema["parameters"]["additionalProperties"] is False for schema in schemas)
+
+
+@pytest.mark.asyncio
+async def test_local_provider_defaults_to_read_only_and_rejects_hidden_write_paths(
+    tmp_path,
+):
+    provider = LocalDevToolProvider(
+        "local",
+        _workspace(tmp_path),
+        path_guard=WorkspacePathGuard.from_roots((tmp_path,)),
+    )
+
+    schemas = await provider.list_tools()
+    assert [schema["name"] for schema in schemas] == [
+        "list_dir",
+        "find_files",
+        "grep_code",
+        "read_file",
+        "code_search",
+        "search_workspace",
+    ]
+    with pytest.raises(PermissionError, match="write mode is disabled"):
+        await provider.call_tool(
+            "preview_create_file",
+            {
+                "path": "api/new.py",
+                "content": "safe = True\n",
+                "validation_profile": "python_pytest",
+            },
+        )
+    with pytest.raises(PermissionError, match="write mode is disabled"):
+        await provider.prepare_approval(
+            "apply_workspace_change",
+            {"proposal_id": "proposal-1", "patch_sha256": "hash-1"},
+        )
+    with pytest.raises(PermissionError, match="write mode is disabled"):
+        await provider.call_approved_tool(
+            "apply_workspace_change",
+            {"proposal_id": "proposal-1", "patch_sha256": "hash-1"},
+            "proposal-1",
+        )
 
 
 @pytest.mark.asyncio
@@ -93,6 +135,7 @@ async def test_controlled_change_requires_approved_provider_path(tmp_path):
         _workspace(tmp_path),
         path_guard=WorkspacePathGuard.from_roots((tmp_path,)),
         change_service=ChangeService(),
+        write_enabled=True,
     )
     arguments = {"proposal_id": "proposal-1", "patch_sha256": "hash-1"}
 

@@ -20,6 +20,7 @@ def isolate_settings_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "WORKSPACE_DIR",
         "WORKSPACE_METADATA_DIR",
         "WORKSPACE_ALLOWED_ROOTS",
+        "WORKSPACE_WRITE_ENABLED",
         "RAG_DB_PATH",
     }
     normalized_setting_names = {name.casefold() for name in setting_names}
@@ -36,6 +37,7 @@ def test_secure_local_defaults_are_backward_compatible() -> None:
     settings = make_settings()
 
     assert settings.app_host == "127.0.0.1"
+    assert settings.workspace_write_enabled is False
     assert settings.workspace_metadata_path == Path("~/.dev-copilot").expanduser().resolve()
     assert settings.workspace_allowed_root_paths == (
         Path(settings.workspace_dir).expanduser().resolve(),
@@ -49,6 +51,14 @@ def test_secure_local_defaults_are_backward_compatible() -> None:
     assert settings.resolved_rag_db_path == (
         settings.workspace_metadata_path / "rag.sqlite3"
     )
+
+
+def test_workspace_write_mode_requires_explicit_boolean_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORKSPACE_WRITE_ENABLED", "true")
+
+    assert make_settings().workspace_write_enabled is True
 
 
 def test_checkpoint_paths_can_be_overridden(tmp_path: Path) -> None:

@@ -43,6 +43,7 @@ def _app(tmp_path):
     app.state.mcp_managers = {}
     app.state.workspace_manager_lock = asyncio.Lock()
     app.state.proposal_store = SqliteProposalStore(tmp_path / "proposals.sqlite3")
+    app.state.workspace_write_enabled = True
     app.state.agent_graph = CapturingGraph()
     app.state.dispatcher = FakeDispatcher()
     app.include_router(chat.router, prefix="/chat")

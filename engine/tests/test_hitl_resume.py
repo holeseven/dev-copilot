@@ -495,7 +495,7 @@ async def test_real_controlled_change_waits_for_approval_then_applies_and_tests(
         proposal_store=SqliteProposalStore(proposal_database),
     )
     provider = LocalDevToolProvider(
-        "local", workspace, guard, change_service=service
+        "local", workspace, guard, change_service=service, write_enabled=True
     )
     manager = MCPManager(
         [{"name": "local", "type": "local", "provider": provider}]
@@ -558,7 +558,11 @@ async def test_real_controlled_change_waits_for_approval_then_applies_and_tests(
             proposal_store=SqliteProposalStore(proposal_database),
         )
         restarted_provider = LocalDevToolProvider(
-            "local", workspace, guard, change_service=restarted_service
+            "local",
+            workspace,
+            guard,
+            change_service=restarted_service,
+            write_enabled=True,
         )
         restarted_manager = MCPManager(
             [{"name": "local", "type": "local", "provider": restarted_provider}]

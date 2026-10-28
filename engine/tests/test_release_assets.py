@@ -48,6 +48,18 @@ def test_repository_contains_standard_mit_license_for_lxy():
     assert "THE SOFTWARE IS PROVIDED \"AS IS\"" in license_text
 
 
+def test_public_contribution_and_security_policies_are_release_ready():
+    contributing = (REPOSITORY_ROOT / "CONTRIBUTING.md").read_text("utf-8")
+    security = (REPOSITORY_ROOT / "SECURITY.md").read_text("utf-8")
+
+    assert "python scripts/verify.py" in contributing
+    assert "WORKSPACE_WRITE_ENABLED" in contributing
+    assert "不要提交" in contributing
+    assert "GitHub Security Advisory" in security
+    assert "不要在公开 Issue" in security
+    assert "本地单用户" in security
+
+
 def test_readme_describes_ci_license_and_current_rag_status():
     readme = (REPOSITORY_ROOT / "README.md").read_text("utf-8")
 

@@ -9,7 +9,10 @@ RUN mvn -B -q -DskipTests package
 
 FROM eclipse-temurin:17-jre
 
-RUN groupadd --system --gid 10001 devcopilot \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 devcopilot \
     && useradd --system --uid 10001 --gid devcopilot --home-dir /app devcopilot \
     && mkdir -p /app \
     && chown devcopilot:devcopilot /app

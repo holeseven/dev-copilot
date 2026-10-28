@@ -42,6 +42,7 @@ services:
     build:
       context: ./engine
       dockerfile: Dockerfile
+      target: runtime
     container_name: dev-copilot-engine
     read_only: true
     tmpfs:
@@ -60,6 +61,7 @@ services:
       APP_NAME: "${APP_NAME:-dev-copilot-engine}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       WORKSPACE_ALLOWED_ROOTS: '["/workspace"]'
+      WORKSPACE_WRITE_ENABLED: "false"
       WORKSPACE_METADATA_DIR: /data/dev-copilot
       CHECKPOINT_DB_PATH: "${CHECKPOINT_DB_PATH:-/data/dev-copilot/checkpoints.sqlite3}"
       PROPOSAL_DB_PATH: "${PROPOSAL_DB_PATH:-/data/dev-copilot/proposals.sqlite3}"
@@ -109,6 +111,18 @@ services:
     networks:
       - backend
       - frontend
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - http://127.0.0.1:8081/actuator/health
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     depends_on:
       mysql:
         condition: service_healthy
@@ -134,7 +148,7 @@ services:
       - frontend
     depends_on:
       java-service:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test:
         - CMD

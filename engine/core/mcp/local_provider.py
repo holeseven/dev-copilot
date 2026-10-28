@@ -28,6 +28,7 @@ class LocalDevToolProvider(ToolProvider):
         *,
         change_service: Optional[ControlledChangeService] = None,
         rag_service: Any = None,
+        write_enabled: bool = False,
     ):
         super().__init__(name)
         self.workspace = workspace
@@ -35,14 +36,17 @@ class LocalDevToolProvider(ToolProvider):
         self._repositories = {
             repository.name: repository for repository in workspace.repositories
         }
-        self.change_service = change_service or ControlledChangeService(
-            workspace=workspace,
-            path_guard=path_guard,
-        )
+        self.write_enabled = write_enabled
+        self.change_service = change_service
+        if self.write_enabled and self.change_service is None:
+            self.change_service = ControlledChangeService(
+                workspace=workspace,
+                path_guard=path_guard,
+            )
         self.rag_service = rag_service
 
     async def list_tools(self) -> List[Dict[str, Any]]:
-        return [
+        tools = [
             self._schema("list_dir", "List a directory in the workspace.", {"path": {"type": "string"}}),
             self._schema("find_files", "Find files by glob pattern in the workspace.", {"glob_pattern": {"type": "string"}, "path": {"type": "string"}}, ["glob_pattern"]),
             self._schema("grep_code", "Search code with a regular expression.", {"pattern": {"type": "string"}, "path": {"type": "string"}, "ignore_case": {"type": "boolean"}}, ["pattern"]),
@@ -57,6 +61,10 @@ class LocalDevToolProvider(ToolProvider):
                 },
                 ["query"],
             ),
+        ]
+        if not self.write_enabled:
+            return tools
+        tools.extend([
             self._schema(
                 "preview_edit_file",
                 "Preview one exact UTF-8 replacement. Use the returned proposal with apply_workspace_change.",
@@ -93,9 +101,16 @@ class LocalDevToolProvider(ToolProvider):
                 },
                 ["proposal_id", "patch_sha256"],
             ),
-        ]
+        ])
+        return tools
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+        if tool_name in {
+            "preview_edit_file",
+            "preview_create_file",
+            "apply_workspace_change",
+        } and not self.write_enabled:
+            raise PermissionError("workspace write mode is disabled")
         if tool_name == "list_dir":
             return self._list_dir(arguments.get("path", "."))
         if tool_name == "find_files":
@@ -147,6 +162,8 @@ class LocalDevToolProvider(ToolProvider):
     ) -> Optional[ToolApprovalRequest]:
         if tool_name != "apply_workspace_change":
             return None
+        if not self.write_enabled:
+            raise PermissionError("workspace write mode is disabled")
         self._require_exact_keys(arguments, {"proposal_id", "patch_sha256"})
         request = self.change_service.approval_request(
             arguments["proposal_id"], arguments["patch_sha256"]
@@ -165,6 +182,8 @@ class LocalDevToolProvider(ToolProvider):
     ) -> Any:
         if tool_name != "apply_workspace_change":
             raise PermissionError("tool is not available for approved execution")
+        if not self.write_enabled:
+            raise PermissionError("workspace write mode is disabled")
         self._require_exact_keys(arguments, {"proposal_id", "patch_sha256"})
         return await self.change_service.apply_approved(
             arguments["proposal_id"],
