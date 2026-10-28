@@ -247,19 +247,21 @@ class SafeTestRunner:
 
     def _resolve_executable(self, name: str) -> str:
         if name == "python":
-            executable = Path(sys.executable).resolve()
+            executable = Path(sys.executable).absolute()
+            security_path = executable.resolve()
         else:
             located = shutil.which(name)
             if located is None:
                 raise ValueError(f"test runtime is unavailable for profile: {name}")
             executable = Path(located).resolve()
+            security_path = executable
         if not executable.is_file():
             raise ValueError(f"test runtime is unavailable for profile: {name}")
-        try:
-            executable.relative_to(self.repository.root)
-        except ValueError:
-            pass
-        else:
+        for candidate in (executable, security_path):
+            try:
+                candidate.relative_to(self.repository.root)
+            except ValueError:
+                continue
             raise ValueError("test runtime cannot be loaded from the repository")
         return str(executable)
 

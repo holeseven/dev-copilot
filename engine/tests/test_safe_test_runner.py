@@ -83,6 +83,32 @@ def _repository(tmp_path: Path):
     return guard.bind(Repository(name="service", path=str(root))), root
 
 
+def test_python_profile_preserves_the_active_virtualenv_launcher(
+    tmp_path, monkeypatch
+):
+    repository, root = _repository(tmp_path)
+    launcher = tmp_path / "venv" / "bin" / "python"
+    base_interpreter = tmp_path / "runtime" / "python"
+    launcher.parent.mkdir(parents=True)
+    base_interpreter.parent.mkdir(parents=True)
+    launcher.write_text("launcher", encoding="utf-8")
+    base_interpreter.write_text("runtime", encoding="utf-8")
+    original_resolve = Path.resolve
+
+    def fake_resolve(path, *args, **kwargs):
+        if path == launcher:
+            return base_interpreter
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(sys, "executable", str(launcher))
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    resolved = SafeTestRunner(repository)._resolve_executable("python")
+
+    assert resolved == str(launcher.absolute())
+    assert Path(resolved).is_relative_to(root) is False
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("profile", "marker", "expected_argv"),
