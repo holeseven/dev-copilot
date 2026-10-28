@@ -43,6 +43,34 @@ def test_ci_runs_the_cross_stack_gate_with_least_privilege():
     assert steps[-1]["run"] == "python scripts/verify.py"
 
 
+def test_ci_validates_and_builds_default_and_writable_container_releases():
+    workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+    workflow = yaml.load(workflow_path.read_text("utf-8"), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["containers"]
+
+    assert job["timeout-minutes"] == "30"
+    assert job["permissions"] == {"contents": "read"}
+    assert job["steps"][0]["uses"] == "actions/checkout@v7"
+    assert job["steps"][0]["with"]["persist-credentials"] == "false"
+    release_step = job["steps"][1]
+    assert release_step["env"] == {
+        "DEV_COPILOT_ALLOWED_ROOT": "${{ github.workspace }}",
+        "DEV_COPILOT_MYSQL_ROOT_PASSWORD": "ci-only-root-password",
+        "DEV_COPILOT_DB_PASSWORD": "ci-only-app-password",
+    }
+    commands = release_step["run"]
+    assert "docker compose config --quiet" in commands
+    assert (
+        "docker compose -f docker-compose.yml -f docker-compose.write.yml "
+        "config --quiet"
+    ) in commands
+    assert "docker compose build engine java-service web" in commands
+    assert (
+        "docker compose -f docker-compose.yml -f docker-compose.write.yml "
+        "build engine"
+    ) in commands
+
+
 def test_repository_contains_standard_mit_license_for_lxy():
     license_text = (REPOSITORY_ROOT / "LICENSE").read_text("utf-8")
 

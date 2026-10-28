@@ -58,3 +58,25 @@ jobs:
 
       - name: Run cross-stack verification
         run: python scripts/verify.py
+
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate and build container releases
+        env:
+          DEV_COPILOT_ALLOWED_ROOT: ${{ github.workspace }}
+          DEV_COPILOT_MYSQL_ROOT_PASSWORD: ci-only-root-password
+          DEV_COPILOT_DB_PASSWORD: ci-only-app-password
+        run: |
+          docker compose config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.write.yml config --quiet
+          docker compose build engine java-service web
+          docker compose -f docker-compose.yml -f docker-compose.write.yml build engine
