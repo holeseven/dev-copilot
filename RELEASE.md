@@ -27,6 +27,8 @@ docker compose -f docker-compose.yml -f docker-compose.write.yml config --quiet
 
 最终验收必须确认普通 Compose 中 `WORKSPACE_WRITE_ENABLED=false`、Workspace bind 为只读、数据存储不发布宿主端口，并确认可写 override 只改变 Engine 构建目标、写入开关和 Workspace bind。
 
+GitHub Actions 还会真实构建默认与可写镜像，并以 `docker compose up -d --no-build --wait` 启动默认全栈，访问 Web 首页和 Java 健康端点后执行带 volume 与 orphan 清理的回收步骤。
+
 ## 运行可观测性
 
 Engine 健康端点为 `/health`，Java 健康端点为 `/actuator/health`，Compose 会等待依赖健康后再启动 Web。Engine 为每个 HTTP 请求生成或保留安全的 `X-Request-ID`，在响应头和结构化日志上下文中返回该标识，便于关联故障。

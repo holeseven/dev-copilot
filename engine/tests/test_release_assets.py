@@ -52,12 +52,12 @@ def test_ci_validates_and_builds_default_and_writable_container_releases():
     assert job["permissions"] == {"contents": "read"}
     assert job["steps"][0]["uses"] == "actions/checkout@v7"
     assert job["steps"][0]["with"]["persist-credentials"] == "false"
-    release_step = job["steps"][1]
-    assert release_step["env"] == {
+    assert job["env"] == {
         "DEV_COPILOT_ALLOWED_ROOT": "${{ github.workspace }}",
         "DEV_COPILOT_MYSQL_ROOT_PASSWORD": "ci-only-root-password",
         "DEV_COPILOT_DB_PASSWORD": "ci-only-app-password",
     }
+    release_step = job["steps"][1]
     commands = release_step["run"]
     assert "docker compose config --quiet" in commands
     assert (
@@ -69,6 +69,17 @@ def test_ci_validates_and_builds_default_and_writable_container_releases():
         "docker compose -f docker-compose.yml -f docker-compose.write.yml "
         "build engine"
     ) in commands
+
+    smoke_step = job["steps"][2]
+    assert smoke_step["run"] == (
+        "docker compose up -d --no-build --wait --wait-timeout 180\n"
+        "curl --fail --silent --show-error http://127.0.0.1:3000/ > /dev/null\n"
+        "curl --fail --silent --show-error "
+        "http://127.0.0.1:8081/actuator/health > /dev/null\n"
+    )
+    cleanup_step = job["steps"][3]
+    assert cleanup_step["if"] == "always()"
+    assert cleanup_step["run"] == "docker compose down --volumes --remove-orphans"
 
 
 def test_repository_contains_standard_mit_license_for_lxy():
@@ -98,6 +109,7 @@ def test_public_release_manifest_defines_reproducible_acceptance_and_rollback():
     assert "0.1.0" in release
     assert "python scripts/verify.py" in release
     assert "docker compose config" in release
+    assert "docker compose up -d --no-build --wait" in release
     assert "WORKSPACE_WRITE_ENABLED=false" in release
     assert "回滚" in release
     assert "RELEASE.md" in readme

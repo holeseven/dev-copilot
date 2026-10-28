@@ -64,6 +64,10 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      DEV_COPILOT_ALLOWED_ROOT: ${{ github.workspace }}
+      DEV_COPILOT_MYSQL_ROOT_PASSWORD: ci-only-root-password
+      DEV_COPILOT_DB_PASSWORD: ci-only-app-password
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -71,12 +75,18 @@ jobs:
           persist-credentials: false
 
       - name: Validate and build container releases
-        env:
-          DEV_COPILOT_ALLOWED_ROOT: ${{ github.workspace }}
-          DEV_COPILOT_MYSQL_ROOT_PASSWORD: ci-only-root-password
-          DEV_COPILOT_DB_PASSWORD: ci-only-app-password
         run: |
           docker compose config --quiet
           docker compose -f docker-compose.yml -f docker-compose.write.yml config --quiet
           docker compose build engine java-service web
           docker compose -f docker-compose.yml -f docker-compose.write.yml build engine
+
+      - name: Start and smoke-test the default stack
+        run: |
+          docker compose up -d --no-build --wait --wait-timeout 180
+          curl --fail --silent --show-error http://127.0.0.1:3000/ > /dev/null
+          curl --fail --silent --show-error http://127.0.0.1:8081/actuator/health > /dev/null
+
+      - name: Clean up container release test
+        if: always()
+        run: docker compose down --volumes --remove-orphans
