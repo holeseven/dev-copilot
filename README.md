@@ -230,6 +230,6 @@ dev-copilot/
 
 [MIT License](LICENSE)
 
-参与开发请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
+参与开发请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)；发布验收与回滚见 [RELEASE.md](RELEASE.md)；安全问题请按 [SECURITY.md](SECURITY.md) 私下报告。
 
 作者：lxy

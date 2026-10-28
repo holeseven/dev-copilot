@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from uuid import UUID
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -378,3 +379,19 @@ def test_application_mounts_workspace_routes():
     assert "/workspaces/{workspace_id}/rag/index" in paths
     assert "/workspaces/{workspace_id}/rag/index/rebuild" in paths
     assert "/workspaces/{workspace_id}/rag/query" in paths
+
+
+def test_http_requests_receive_safe_correlation_ids():
+    client = TestClient(main.create_app())
+
+    generated = client.get("/health")
+    generated_id = generated.headers["x-request-id"]
+    assert str(UUID(generated_id)) == generated_id
+
+    preserved = client.get("/health", headers={"x-request-id": "client-request_42"})
+    assert preserved.headers["x-request-id"] == "client-request_42"
+
+    replaced = client.get("/health", headers={"x-request-id": "unsafe request id"})
+    replaced_id = replaced.headers["x-request-id"]
+    assert replaced_id != "unsafe request id"
+    assert str(UUID(replaced_id)) == replaced_id

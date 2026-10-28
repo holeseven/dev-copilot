@@ -1,7 +1,10 @@
 # @author lxy
 from pathlib import Path
+import json
+import xml.etree.ElementTree as ElementTree
 
 import yaml
+import tomllib
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -58,6 +61,39 @@ def test_public_contribution_and_security_policies_are_release_ready():
     assert "GitHub Security Advisory" in security
     assert "不要在公开 Issue" in security
     assert "本地单用户" in security
+
+
+def test_public_release_manifest_defines_reproducible_acceptance_and_rollback():
+    release = (REPOSITORY_ROOT / "RELEASE.md").read_text("utf-8")
+    readme = (REPOSITORY_ROOT / "README.md").read_text("utf-8")
+
+    assert "0.1.0" in release
+    assert "python scripts/verify.py" in release
+    assert "docker compose config" in release
+    assert "WORKSPACE_WRITE_ENABLED=false" in release
+    assert "回滚" in release
+    assert "RELEASE.md" in readme
+
+
+def test_release_version_is_consistent_across_all_components():
+    engine = tomllib.loads(
+        (REPOSITORY_ROOT / "engine/pyproject.toml").read_text("utf-8")
+    )
+    root_package = json.loads((REPOSITORY_ROOT / "package.json").read_text("utf-8"))
+    web_package = json.loads(
+        (REPOSITORY_ROOT / "web/package.json").read_text("utf-8")
+    )
+    java_project = ElementTree.fromstring(
+        (REPOSITORY_ROOT / "java-service/pom.xml").read_text("utf-8")
+    )
+    namespace = {"m": "http://maven.apache.org/POM/4.0.0"}
+
+    assert {
+        engine["project"]["version"],
+        root_package["version"],
+        web_package["version"],
+        java_project.findtext("m:version", namespaces=namespace),
+    } == {"0.1.0"}
 
 
 def test_readme_describes_ci_license_and_current_rag_status():

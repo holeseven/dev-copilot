@@ -11,11 +11,13 @@ Dev Copilot 引擎 FastAPI 入口
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from loguru import logger
 
@@ -34,11 +36,28 @@ from engine.core.rag.store import RagStore
 from engine.orchestrator.graph_builder import build_agent_graph
 
 
+_REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
+
+
+def _request_id(value: str | None) -> str:
+    if value is not None and _REQUEST_ID_PATTERN.fullmatch(value):
+        return value
+    return str(uuid.uuid4())
+
+
 def _setup_logging() -> None:
     """配置 loguru 日志输出"""
     settings = get_settings()
     logger.remove()
-    logger.add(sys.stderr, level=settings.log_level)
+    logger.configure(extra={"request_id": "-"})
+    logger.add(
+        sys.stderr,
+        level=settings.log_level,
+        format=(
+            "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level} | "
+            "request_id={extra[request_id]} | {message}"
+        ),
+    )
 
 
 @asynccontextmanager
@@ -186,6 +205,15 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def correlate_request(request: Request, call_next):
+        request_id = _request_id(request.headers.get("x-request-id"))
+        request.state.request_id = request_id
+        with logger.contextualize(request_id=request_id):
+            response = await call_next(request)
+        response.headers["x-request-id"] = request_id
+        return response
 
     @app.get("/health", tags=["system"])
     async def health() -> dict:

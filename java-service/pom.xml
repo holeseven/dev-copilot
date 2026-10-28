@@ -13,7 +13,7 @@
 
     <groupId>com.agent</groupId>
     <artifactId>agent-data-service</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>0.1.0</version>
     <name>agent-data-service</name>
     <description>Java 数据持久化服务 - 消费 Python Agent 引擎产生的会话/记忆数据，持久化到 MySQL</description>
 
