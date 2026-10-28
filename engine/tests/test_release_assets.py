@@ -77,7 +77,14 @@ def test_ci_validates_and_builds_default_and_writable_container_releases():
         "curl --fail --silent --show-error "
         "http://127.0.0.1:8081/actuator/health > /dev/null\n"
     )
-    cleanup_step = job["steps"][3]
+    diagnostics_step = job["steps"][3]
+    assert diagnostics_step["if"] == "failure()"
+    assert diagnostics_step["run"] == (
+        "docker compose ps --all\n"
+        "docker compose logs --no-color --timestamps\n"
+    )
+
+    cleanup_step = job["steps"][4]
     assert cleanup_step["if"] == "always()"
     assert cleanup_step["run"] == "docker compose down --volumes --remove-orphans"
 
