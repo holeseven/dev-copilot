@@ -62,6 +62,7 @@ async def test_code_search_preflights_tree_before_accepting_ripgrep_result(
             ["cmd", "/c", "mklink", "/J", str(linked), str(outside)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         if result.returncode != 0:
             pytest.skip(f"junction creation unavailable: {result.stderr.strip()}")

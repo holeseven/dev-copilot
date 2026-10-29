@@ -281,6 +281,7 @@ def test_preview_rejects_windows_junction_inside_repository(tmp_path):
         ["cmd", "/c", "mklink", "/J", str(junction), str(actual)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         pytest.skip(f"junction creation unavailable: {result.stderr.strip()}")

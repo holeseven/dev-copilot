@@ -160,6 +160,7 @@ def test_guard_rejects_windows_directory_junction_to_outside(tmp_path):
         ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         pytest.skip(f"junction creation unavailable: {result.stderr.strip()}")
