@@ -32,6 +32,30 @@ def _prepared_store(tmp_path):
     return database, store, service, root, preview
 
 
+def test_proposal_lifecycle_without_sqlite_subsecond_modifier(tmp_path, monkeypatch):
+    real_connect = SqliteProposalStore._connect
+
+    def connect_without_subseconds(self):
+        connection = real_connect(self)
+        connection.create_function("unixepoch", 1, lambda modifier: None)
+        return connection
+
+    monkeypatch.setattr(SqliteProposalStore, "_connect", connect_without_subseconds)
+    database, store, _service_instance, _root, preview = _prepared_store(tmp_path)
+    outcome, claimed = store.claim_outcome(
+        "workspace-1", "generation-1", preview["proposal_id"], "session-1"
+    )
+    assert claimed and outcome.state == "applying"
+    completed = store.complete_outcome(
+        "workspace-1", "generation-1", preview["proposal_id"], "session-1",
+        "rejected", {"status": "rejected"},
+    )
+    assert completed.state == "rejected"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT created_at FROM prepared_changes").fetchone()[0] > 0
+        assert connection.execute("SELECT updated_at FROM approval_outcomes").fetchone()[0] > 0
+
+
 @pytest.mark.asyncio
 async def test_outcome_claim_is_session_hashed_and_compare_and_set(tmp_path):
     database, first, _service_instance, _root, preview = _prepared_store(tmp_path)

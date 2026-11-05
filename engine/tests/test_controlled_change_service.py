@@ -14,6 +14,7 @@ from engine.core.workspace.proposal_store import SqliteProposalStore
 from engine.core.workspace.models import Repository, Workspace
 from engine.core.workspace.mutations import MutationConflictError
 from engine.core.workspace.path_guard import WorkspacePathGuard
+from engine.core.execution.test_runner import SafeTestRunner
 
 
 class FakeClock:
@@ -117,6 +118,35 @@ def _restarted_service(
         clock=FakeClock(),
         proposal_store=proposal_store,
     )
+
+
+@pytest.mark.asyncio
+async def test_approved_change_runs_real_pytest_and_reports_its_output(tmp_path):
+    service, root = _service(tmp_path, runner_factory=SafeTestRunner)
+    source = root / "calculator.py"
+    source.write_text("def add(a, b):\n    return 0\n", encoding="utf-8")
+    (root / "test_calculator.py").write_text(
+        "from calculator import add\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+    baseline = await SafeTestRunner(service.path_guard.bind(service.workspace.repositories[0])).run("python_pytest")
+    assert baseline["status"] == "failed"
+    assert baseline["exit_code"] == 1
+
+    proposal = service.preview_replace(
+        "service/calculator.py", "return 0", "return a + b", "python_pytest"
+    )
+    request = service.approval_request(proposal["proposal_id"], proposal["patch_sha256"])
+    assert source.read_text("utf-8") == "def add(a, b):\n    return 0\n"
+
+    result = await service.apply_approved(
+        proposal["proposal_id"], proposal["patch_sha256"], request.approval_id
+    )
+
+    assert source.read_text("utf-8") == "def add(a, b):\n    return a + b\n"
+    assert result["status"] == "applied_and_tests_passed"
+    assert result["validation"]["exit_code"] == 0
+    assert "1 passed" in result["validation"]["stdout"]
 
 
 def test_preview_is_read_only_and_returns_only_safe_public_fields(tmp_path):

@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 from engine.core.workspace.mutations import MutationProposal
 
@@ -79,7 +80,7 @@ class SqliteProposalStore:
                 INSERT INTO prepared_changes (
                     workspace_id, generation, proposal_id, patch_sha256,
                     state, payload_json, validation_profile, expires_at, created_at
-                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, unixepoch('subsec'))
+                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
                 """,
                 (
                     workspace_id,
@@ -89,6 +90,7 @@ class SqliteProposalStore:
                     json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                     validation_profile,
                     expires_at,
+                    time.time(),
                 ),
             )
             rows = connection.execute(
@@ -222,9 +224,9 @@ class SqliteProposalStore:
                     INSERT OR IGNORE INTO approval_outcomes (
                         workspace_id, generation, approval_id, session_sha256,
                         state, result_json, updated_at
-                    ) VALUES (?, ?, ?, ?, 'applying', '{}', unixepoch('subsec'))
+                    ) VALUES (?, ?, ?, ?, 'applying', '{}', ?)
                     """,
-                    (workspace_id, generation, approval_id, session_sha256),
+                    (workspace_id, generation, approval_id, session_sha256, time.time()),
                 )
                 outcome_claimed = cursor.rowcount == 1
                 self._prune_old_terminal_generations(
@@ -325,13 +327,14 @@ class SqliteProposalStore:
             connection.execute(
                 """
                 UPDATE approval_outcomes
-                SET state = ?, result_json = ?, updated_at = unixepoch('subsec')
+                SET state = ?, result_json = ?, updated_at = ?
                 WHERE workspace_id = ? AND generation = ? AND approval_id = ?
                   AND session_sha256 = ? AND state = 'applying'
                 """,
                 (
                     state,
                     payload,
+                    time.time(),
                     workspace_id,
                     generation,
                     approval_id,
@@ -438,11 +441,11 @@ class SqliteProposalStore:
             connection.execute(
                 """
                 UPDATE approval_outcomes
-                SET state = ?, result_json = ?, updated_at = unixepoch('subsec')
+                SET state = ?, result_json = ?, updated_at = ?
                 WHERE workspace_id = ? AND generation = ? AND approval_id = ?
                   AND state = 'applying'
                 """,
-                (state, payload, workspace_id, generation, approval_id),
+                (state, payload, time.time(), workspace_id, generation, approval_id),
             )
             row = connection.execute(
                 """
