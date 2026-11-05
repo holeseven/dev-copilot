@@ -778,7 +778,7 @@ export function App() {
             {messages.length === 0 ? (
               <div className="welcome-panel">
                 <p className="welcome-kicker">READY WHEN YOU ARE</p>
-                <h2>小瑶主人，<br />我来帮你开发了。</h2>
+                <h2>你好，<br />我来帮你开发了。</h2>
                 <p>选择一个 Workspace，然后告诉我今天要完成什么。我会先读取项目，再把每一步工具动作摆在台面上。</p>
                 <div className="prompt-grid">
                   {QUICK_PROMPTS.map((prompt, index) => (
@@ -793,7 +793,7 @@ export function App() {
               <div className="message-list">
                 {messages.map((message) => (
                   <article key={message.id} className={`message ${message.role}`}>
-                    <p className="message-role">{message.role === "user" ? "主人" : "小瑶"}</p>
+                    <p className="message-role">{message.role === "user" ? "你" : "小瑶"}</p>
                     <div>{message.content || (busy ? <span className="typing">正在理解项目<span>…</span></span> : "未返回内容")}</div>
                     {message.role === "assistant" ? <CitationList citations={message.citations ?? []} /> : null}
                   </article>
@@ -1190,7 +1190,7 @@ function statusLabel(status: RunStatus) {
   return ({
     idle: "等待指令", connecting: "连接引擎", streaming: "协作中",
     recovering: "恢复上次任务", recovery_failed: "等待重新检查",
-    awaiting_approval: "等待主人确认", resuming: "正在恢复任务", applying: "正在执行修改",
+    awaiting_approval: "等待确认", resuming: "正在恢复任务", applying: "正在执行修改",
     completed: "本轮完成", failed: "需要处理", cancelled: "已停止",
   })[status];
 }

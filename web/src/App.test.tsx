@@ -328,7 +328,7 @@ describe("小瑶开发助手工作台", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { level: 1, name: "小瑶开发助手" })).toBeInTheDocument();
-    expect(screen.getByText(/小瑶主人/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /你好，.*我来帮你开发了/ })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: /本地项目/ })).toBeInTheDocument();
     expect(screen.getByText("代码留在本机")).toBeInTheDocument();
   });
@@ -468,7 +468,7 @@ describe("小瑶开发助手工作台", () => {
     expect(await screen.findByRole("heading", { name: "小瑶准备修改代码" })).toBeInTheDocument();
     expect(screen.getByText("src/auth.py")).toBeInTheDocument();
     expect(screen.getByText("+new", { exact: false })).toBeInTheDocument();
-    expect(screen.getByText("等待主人确认")).toBeInTheDocument();
+    expect(screen.getByText("等待确认", { selector: '[role="status"]' })).toBeInTheDocument();
     expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "批准并执行" }));
@@ -957,7 +957,7 @@ describe("小瑶开发助手工作台", () => {
     render(<App />);
 
     expect(await screen.findByText("src/restored.py")).toBeInTheDocument();
-    expect(screen.getByText("等待主人确认")).toBeInTheDocument();
+    expect(screen.getByText("等待确认", { selector: '[role="status"]' })).toBeInTheDocument();
     expect(screen.getByLabelText("告诉小瑶你想分析、修改或验证什么")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "批准并执行" }));
     await waitFor(() => expect(streamResume).toHaveBeenCalledOnce());
@@ -998,7 +998,7 @@ describe("小瑶开发助手工作台", () => {
 
     expect(await screen.findByText("src/current.py")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "批准并执行" })).toBeInTheDocument();
-    expect(screen.getByText("等待主人确认")).toBeInTheDocument();
+    expect(screen.getByText("等待确认", { selector: '[role="status"]' })).toBeInTheDocument();
     expect(screen.queryByText("本轮完成")).not.toBeInTheDocument();
     expect(screen.getAllByText("src/historical.py").length).toBeGreaterThan(0);
   });

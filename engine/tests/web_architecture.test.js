@@ -24,7 +24,6 @@ assert.doesNotMatch(source, /(?:localhost|127\.0\.0\.1):8000|engine(?::8000)?/);
 assert.match(source, /\/api\/v1\/agent\/chat/);
 assert.match(source, /\/api\/v1\/workspaces/);
 assert.match(source, /小瑶开发助手/);
-assert.match(source, /小瑶主人/);
 for (const file of productionFiles) {
   const content = fs.readFileSync(file, "utf8");
   if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
