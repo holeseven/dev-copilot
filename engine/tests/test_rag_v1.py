@@ -1,6 +1,7 @@
 # @author lxy
 import asyncio
 import builtins
+import os
 from pathlib import Path
 
 import httpx
@@ -125,6 +126,59 @@ def test_interrupted_build_recovers_as_failed(tmp_path):
 
     assert recovered.status(workspace).state == "failed"
     assert recovered.status(workspace).error_code == "index_interrupted"
+
+
+@pytest.mark.asyncio
+async def test_rebuild_prunes_dependency_build_and_hidden_trees(tmp_path, monkeypatch):
+    workspace, guard = _workspace(tmp_path)
+    repo = Path(workspace.repositories[0].path)
+    (repo / "README.md").write_text("# Setup\nRun the invoice service.\n", encoding="utf-8")
+    for relative in (".venv/lib", "web/node_modules/pkg", "java/target/classes", ".cache", "nested/BUILD"):
+        directory = repo / relative
+        directory.mkdir(parents=True)
+        (directory / "generated.py").write_text("dependency_only = True\n", encoding="utf-8")
+    (repo / "web/app.ts").write_text("export const invoice = true;\n", encoding="utf-8")
+    real_walk = os.walk
+    visited = []
+
+    def track_walk(*args, **kwargs):
+        for entry in real_walk(*args, **kwargs):
+            visited.append(Path(entry[0]).relative_to(repo).as_posix())
+            yield entry
+
+    monkeypatch.setattr(os, "walk", track_walk)
+    service = RagService(RagStore(tmp_path / "rag.sqlite3"), guard)
+
+    status = await service.rebuild(workspace)
+
+    assert status.state == "ready"
+    assert sorted(visited) == [".", "java", "nested", "web"]
+    assert status.file_count == 2
+    assert service.query(workspace, "invoice", 5).citations
+    assert not service.query(workspace, "dependency_only", 5).citations
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("directory", ["node_modules", ".cache"])
+async def test_rebuild_excludes_file_aliases_into_ignored_directories(tmp_path, directory):
+    workspace, guard = _workspace(tmp_path)
+    repo = Path(workspace.repositories[0].path)
+    ignored = repo / directory
+    ignored.mkdir()
+    target = ignored / "dependency.py"
+    target.write_text("dependency_only = True\n", encoding="utf-8")
+    try:
+        (repo / "alias.py").symlink_to(target)
+    except OSError:
+        pytest.skip("file symlinks unavailable")
+    (repo / "app.py").write_text("invoice = True\n", encoding="utf-8")
+    service = RagService(RagStore(tmp_path / "rag.sqlite3"), guard)
+
+    status = await service.rebuild(workspace)
+
+    assert status.state == "ready"
+    assert status.file_count == 1
+    assert not service.query(workspace, "dependency_only", 5).citations
 
 
 @pytest.mark.asyncio
@@ -327,7 +381,7 @@ def test_indexer_revalidates_guarded_path_before_and_after_read(tmp_path, monkey
     read_observed_resolve = False
 
     class Guarded:
-        def iter_files(self, relative):
+        def iter_files(self, relative, **kwargs):
             return (source,)
 
         def relative_path(self, path, resolve=False):
@@ -367,7 +421,7 @@ def test_indexer_rejects_when_opened_handle_is_not_the_validated_file(tmp_path, 
     )
 
     class Guarded:
-        def iter_files(self, relative):
+        def iter_files(self, relative, **kwargs):
             return (safe,)
 
         def relative_path(self, path, resolve=False):

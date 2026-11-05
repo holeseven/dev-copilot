@@ -82,7 +82,11 @@ class RagService:
         manifest = self.store.active_manifest(workspace.id, workspace.generation)
         for repository in sorted(workspace.repositories, key=lambda item: item.name):
             guarded = self.path_guard.bind(repository)
-            for file_path in guarded.iter_files("."):
+            for file_path in guarded.iter_files(
+                ".",
+                excluded_directories=EXCLUDED_DIRECTORIES,
+                exclude_hidden_directories=True,
+            ):
                 relative = guarded.relative_path(file_path, resolve=False)
                 parts = Path(relative).parts
                 name = Path(relative).name

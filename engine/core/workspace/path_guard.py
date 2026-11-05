@@ -147,7 +147,13 @@ class GuardedRepository:
         except OSError as exc:
             raise WorkspacePathError(f"cannot read repository file: {relative}") from exc
 
-    def iter_files(self, relative: Union[str, Path] = ".") -> Tuple[Path, ...]:
+    def iter_files(
+        self,
+        relative: Union[str, Path] = ".",
+        *,
+        excluded_directories: Collection[str] = (),
+        exclude_hidden_directories: bool = False,
+    ) -> Tuple[Path, ...]:
         start = self.resolve(relative, must_exist=True)
         try:
             if start.is_file():
@@ -160,6 +166,7 @@ class GuardedRepository:
             ) from exc
 
         files = []
+        excluded = {name.lower() for name in excluded_directories}
 
         def fail_walk(error: OSError) -> None:
             raise WorkspacePathError(f"cannot walk repository directory: {relative}") from error
@@ -176,6 +183,10 @@ class GuardedRepository:
 
             retained_directories = []
             for directory_name in sorted(directories):
+                if directory_name.lower() in excluded or (
+                    exclude_hidden_directories and directory_name.startswith(".")
+                ):
+                    continue
                 directory_path = current_path / directory_name
                 directory_relative = self.relative_path(directory_path, resolve=False)
                 self.resolve(directory_relative, kind="dir", must_exist=True)
