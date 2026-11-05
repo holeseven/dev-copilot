@@ -409,15 +409,17 @@ export function App() {
       setFileChanges((items) => [...items.filter((item) => item.id !== proposalId), change]);
     } else if (event.event === "verification") {
       const toolCallId = stringValue(data.tool_call_id) ?? makeId();
+      const approvalId = activeApprovalRef.current?.approval.id;
+      const resultId = approvalId ? `outcome-${approvalId}` : toolCallId;
       const result: VerificationResult = {
-        id: toolCallId,
+        id: resultId,
         toolCallId: stringValue(data.tool_call_id),
         profile: stringValue(data.profile) ?? "default",
         status: stringValue(data.status) ?? "error",
         exitCode: typeof data.exit_code === "number" ? data.exit_code : null,
         truncated: data.truncated === true,
       };
-      setVerifications((items) => [...items.filter((item) => item.id !== toolCallId), result]);
+      setVerifications((items) => [...items.filter((item) => item.id !== resultId), result]);
     } else if (event.event === "citation") {
       const activeIndexGeneration = knowledgeIndexGenerationRef.current;
       const citation = citationFromEvent(data, workspaceId);

@@ -534,6 +534,11 @@ describe("小瑶开发助手工作台", () => {
       await onEvent({ event: "done", data: { status: "awaiting_approval" } });
     });
     vi.mocked(streamResume).mockImplementation(async (request, onEvent) => {
+      await onEvent({ event: "verification", data: {
+        tool_call_id: "apply-sse-outcome", profile: "python_pytest",
+        status: validationStatus, exit_code: validationStatus === "passed" ? 0 : 1,
+        truncated: false,
+      } });
       await onEvent({ event: "outcome", data: {
         workspace_id: request.workspaceId, session_id: request.sessionId,
         approval_id: request.approvalId, status: outcomeStatus, terminal: true,
