@@ -1,6 +1,6 @@
 <!-- 作者：lxy -->
 
-# 小瑶开发助手（Dev Copilot）
+# 小瑶（Dev Copilot）
 
 > 面向本地代码库的开发助手 Alpha：用 Workspace 管理多个仓库，通过 LangGraph 分析代码，并在主人确认 Diff 后受控修改和验证项目。
 
@@ -18,7 +18,7 @@
 - Java 到 Python 的 SSE 代理保留消息、工具、审批、文件变更和验证事件，支持 `/api/v1/agent/chat/resume` 恢复审批中的任务，区分连接前 HTTP 错误与流中失败，并向上游传播取消；
 - LangGraph checkpoint 与受控修改提案持久化到本地 SQLite；Engine 重启后，工作台会按 Workspace 恢复待审批 Diff，并继续使用原会话批准或拒绝；
 - Workspace RAG 使用本地 SQLite FTS5 按 Workspace 与代际隔离索引 Java、Python、前端源码及常用文档；支持显式后台重建、未变文件复用、增删更新、重启持久化和带行号来源引用；
-- React 产品工作台“**小瑶开发助手**”：管理本地 Workspace、扫描项目、构建知识索引、流式对话、查看来源与工具施工记录，在内联 Diff 卡片中批准或拒绝单次修改，并展示写入和自动测试结果；页面只调用 Java `/api/v1`。
+- React 产品工作台“**小瑶**”：管理本地 Workspace、扫描项目、构建知识索引、流式对话、查看来源与工具施工记录，在内联 Diff 卡片中批准或拒绝单次修改，并展示写入和自动测试结果；页面只调用 Java `/api/v1`。
 
 下列能力仍在开发中，请不要把现有占位模块视为可用功能：
 
@@ -77,7 +77,7 @@ Windows Docker Desktop 可把允许根目录写成例如 `C:/Users/you/code`。�
 docker compose up -d --build
 ```
 
-启动完成后打开“小瑶开发助手”：<http://127.0.0.1:3000>。前端容器只代理版本化的 `/api/v1` 到 Java；Java API 仍可在 <http://127.0.0.1:8081/api/v1> 直接访问。两个入口都只绑定宿主机 loopback。Python Engine 不发布宿主端口，只接受容器间调用，同时保留访问外部模型 API 的网络出口。
+启动完成后打开“小瑶”：<http://127.0.0.1:3000>。前端容器只代理版本化的 `/api/v1` 到 Java；Java API 仍可在 <http://127.0.0.1:8081/api/v1> 直接访问。两个入口都只绑定宿主机 loopback。Python Engine 不发布宿主端口，只接受容器间调用，同时保留访问外部模型 API 的网络出口。
 
 安全 Compose 把 `/workspace` 挂载为只读，并明确关闭 Engine 写工具，因此默认容器模式可完成项目登记、扫描、代码分析和对话，但不能写入代码。仅当你确认 `DEV_COPILOT_ALLOWED_ROOT` 中的代码允许被修改时，才使用显式可写 override：
 
@@ -143,7 +143,7 @@ curl -X POST http://127.0.0.1:8000/workspaces/local-dev/repositories \
 
 Windows 请求体可使用 `C:\\Users\\you\\code\\order-service`。所有仓库仍必须落在 `WORKSPACE_ALLOWED_ROOTS` 之内。
 
-登记仓库后，可在“小瑶开发助手”侧栏点击“构建知识索引”。重建请求返回 `202 Accepted`，页面会轮询构建状态；索引就绪后，Agent 可以调用只读的 `search_workspace`，来源会以 `仓库/相对路径:行号` 显示在对应回答下方。修改仓库登记会产生新的 Workspace 代际，旧索引不会跨代继续提供结果，需要重新构建。
+登记仓库后，可在“小瑶”侧栏点击“构建知识索引”。重建请求返回 `202 Accepted`，页面会轮询构建状态；索引就绪后，Agent 可以调用只读的 `search_workspace`，来源会以 `仓库/相对路径:行号` 显示在对应回答下方。修改仓库登记会产生新的 Workspace 代际，旧索引不会跨代继续提供结果，需要重新构建。
 
 ## React 工作台本地开发
 

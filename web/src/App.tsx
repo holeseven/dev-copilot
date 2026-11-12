@@ -691,7 +691,7 @@ export function App() {
         </button>
         <div className="brand-copy">
           <p className="eyebrow">LOCAL DEV AGENT · ALPHA</p>
-          <h1>小瑶开发助手</h1>
+          <h1>小瑶</h1>
         </div>
         <div className="runtime-pill" role="status">
           <span className={`status-dot status-${status}`} aria-hidden="true" />

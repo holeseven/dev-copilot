@@ -32,7 +32,7 @@ vi.mock("./api/rag", () => ({
 
 const workspace = { id: "local-dev", name: "本地项目", repositories: [] };
 
-describe("小瑶开发助手工作台", () => {
+describe("小瑶工作台", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
@@ -327,7 +327,7 @@ describe("小瑶开发助手工作台", () => {
   it("renders the product identity and local workspace welcome", async () => {
     render(<App />);
 
-    expect(screen.getByRole("heading", { level: 1, name: "小瑶开发助手" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "小瑶" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: /你好，.*我来帮你开发了/ })).toBeInTheDocument();
     expect(await screen.findByRole("button", { name: /本地项目/ })).toBeInTheDocument();
     expect(screen.getByText("代码留在本机")).toBeInTheDocument();
